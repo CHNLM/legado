@@ -3,13 +3,21 @@ package io.legado.app.utils
 import android.net.Uri
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
+import io.legado.app.App
 import io.legado.app.constant.AppPattern.archiveFileRegex
 import io.legado.app.utils.compress.LibArchiveUtils
-import splitties.init.appCtx
 import java.io.File
 
 /**
  * 自动判断压缩文件后缀 然后再调用具体的实现
+ *
+ * # 下沉说明
+ * 保持 app 端不下沉: Android SAF 专属 (Uri/DocumentFile/FileDoc/ParcelFileDescriptor) +
+ * 委托 [LibArchiveUtils] (Android native libarchive)。跨平台解压能力已由
+ * shared/commonMain 的 [io.legado.app.help.archive.ArchiveProvider] 接口覆盖——Android 端
+ * [io.legado.app.help.archive.AndroidArchiveProvider] 在 App.onCreate 经
+ * ArchiveProviders.register 注入, 内部即委托本类, 供 JsExtensions 压缩方法跨端调用;
+ * 本类同时服务 app 端本地场景 (导入书籍/本地书籍解压/文件关联), 不在接口职责边界内。
  */
 @Suppress("unused", "MemberVisibilityCanBePrivate")
 object ArchiveUtils {
@@ -18,7 +26,7 @@ object ArchiveUtils {
 
     // 临时目录 下次启动自动删除
     val TEMP_PATH: String by lazy {
-        appCtx.externalCache.getFile(TEMP_FOLDER_NAME).createFolderReplace().absolutePath
+        App.instance.externalCache.getFile(TEMP_FOLDER_NAME).createFolderReplace().absolutePath
     }
 
     fun deCompress(

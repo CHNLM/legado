@@ -1,67 +1,51 @@
 package io.legado.app.help.book
 
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.ParcelFileDescriptor
-import androidx.documentfile.provider.DocumentFile
-import com.script.rhino.runScriptWithContext
+import io.legado.app.App
 import io.legado.app.constant.AppLog
-import io.legado.app.constant.AppPattern
 import io.legado.app.constant.BookType
-import io.legado.app.constant.EventBus
-import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
-import io.legado.app.help.RuleBigDataHelp
+import io.legado.app.help.book.BookHelp.clearCacheExtra
+import io.legado.app.help.book.BookHelp.clearInvalidCache
+import io.legado.app.help.book.BookHelp.getCacheFile
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.analyzeRule.AnalyzeUrl
-import io.legado.app.model.fileBook.FileBook
-import io.legado.app.ui.book.read.page.provider.ChapterContentParser
+import io.legado.app.model.script.runScriptWithContext
+import io.legado.app.ui.book.read.page.provider.ChapterContentParserShared
 import io.legado.app.utils.ArchiveUtils
-import io.legado.app.utils.EscapeUtils
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.ImageUtils
-import io.legado.app.utils.MD5Utils
-import io.legado.app.utils.StringUtils
 import io.legado.app.utils.SvgUtils
-import io.legado.app.utils.UrlUtil
 import io.legado.app.utils.createFileIfNotExist
 import io.legado.app.utils.exists
 import io.legado.app.utils.externalFiles
 import io.legado.app.utils.getFile
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.onEachParallel
-import io.legado.app.utils.postEvent
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
-import splitties.init.appCtx
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileNotFoundException
-import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
-import java.util.regex.Pattern
-import java.util.zip.ZipFile
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
 @Suppress("unused", "ConstPropertyName")
 object BookHelp {
-    private val downloadDir: File = appCtx.externalFiles
+    private val downloadDir: File = App.instance.externalFiles
     private const val cacheFolderName = "book_cache"
     private const val cacheImageFolderName = "images"
-    private const val cacheEpubFolderName = "epub"
     private val downloadImages = ConcurrentHashMap<String, Mutex>()
 
     val cachePath = FileUtils.getPath(downloadDir, cacheFolderName)
@@ -78,108 +62,65 @@ object BookHelp {
     }
 
     fun updateCacheFolder(oldBook: Book, newBook: Book) {
-        val oldFolderName = oldBook.getFolderNameNoCache()
-        val newFolderName = newBook.getFolderNameNoCache()
-        if (oldFolderName == newFolderName) return
+        if (!BookHelpShared.shouldUpdateCacheFolder(oldBook, newBook)) return
         val oldFolderPath = FileUtils.getPath(
             downloadDir,
             cacheFolderName,
-            oldFolderName
+            oldBook.getFolderNameNoCache()
         )
         val newFolderPath = FileUtils.getPath(
             downloadDir,
             cacheFolderName,
-            newFolderName
+            newBook.getFolderNameNoCache()
         )
         FileUtils.move(oldFolderPath, newFolderPath)
     }
 
     /**
      * 清除已删除书的缓存 解压缓存
+     *
+     * 编排下沉 [BookHelpShared.clearInvalidCache] (四步: 删失效书目录 → 漫画缓存超限淘汰
+     * → 大变量清理 → [clearCacheExtra]), 前两步经 [BookStorageProviders] 回调本类
+     * [clearInvalidBookFolders]。
      */
     suspend fun clearInvalidCache() {
+        BookHelpShared.clearInvalidCache()
+    }
+
+    // 缓存目录清理编排 (clearInvalidBookFolders/evictMangaCache) 已下沉
+    // [BookHelpShared] (三端统一), 本端经 [AndroidBookStorage] 委托调用, 不再保留本地实现。
+
+    /**
+     * 清理平台专属临时文件 (供 WebBookProvidersImpl.clearCacheExtra 委托)。
+     *
+     * 逻辑与 [clearInvalidCache] 末段一致: ArchiveUtils.TEMP_PATH + filesDir/share*.json + books.json。
+     * BookHelpShared.clearInvalidCache 经 BookHelpProviders.clearCacheExtra 调用本方法。
+     */
+    suspend fun clearCacheExtra() {
         withContext(IO) {
-            val allBookFolderNames = appDb.bookDao.allBookUrlsWithName
-            val bookFolderNames = allBookFolderNames.mapTo(HashSet(allBookFolderNames.size)) {
-                it.name.replace(AppPattern.fileNameRegex, "").let { name ->
-                    name.substring(0, min(9, name.length)) + MD5Utils.md5Encode16(it.bookUrl)
-                }
-            }
-            val bookUrls = allBookFolderNames.mapTo(HashSet(allBookFolderNames.size)) { it.bookUrl }
-            val cacheFolder = downloadDir.getFile(cacheFolderName)
-            val cacheFiles = cacheFolder.listFiles()?.filter { it.isDirectory } ?: emptyList()
-
-            coroutineScope {
-                // 1. 删除不在书架的书籍缓存
-                cacheFiles.forEach { bookFile ->
-                    if (!bookFolderNames.contains(bookFile.name)) {
-                        launch { FileUtils.delete(bookFile, true) }
-                    }
-                }
-                // 2. 删除不在书架的规则大数据
-                RuleBigDataHelp.bookData.listFiles()?.filter { it.isDirectory }?.forEach { dir ->
-                    launch {
-                        val bookUrlFile = dir.getFile("bookUrl.txt")
-                        val bookUrl = if (bookUrlFile.exists()) bookUrlFile.readText() else null
-                        if (bookUrl.isNullOrBlank() || !bookUrls.contains(bookUrl)) {
-                            FileUtils.delete(dir, true)
-                        }
-                    }
-                }
-            }
-
-            // 3. 漫画图片缓存管理 (512MB)
-            val validFolders = cacheFiles.filter { bookFolderNames.contains(it.name) }
-            if (validFolders.isNotEmpty()) {
-                val folderSizes = ConcurrentHashMap<File, Long>()
-                val mangaFolders = ConcurrentHashMap.newKeySet<File>()
-                validFolders.asFlow().onEachParallel(8) { folder ->
-                    val folderSize = folder.walk().filter { it.isFile }.sumOf { it.length() }
-                    folderSizes[folder] = folderSize
-                    if (File(folder, cacheImageFolderName).exists()) {
-                        mangaFolders.add(folder)
-                    }
-                }.collect()
-
-                var totalSize = folderSizes.values.sum()
-                val maxSize = 512 * 1024 * 1024L
-                if (totalSize > maxSize) {
-                    val sortedFolders = validFolders.sortedBy { it.lastModified() }
-                    for (folder in sortedFolders) {
-                        if (mangaFolders.contains(folder)) {
-                            val size = folderSizes[folder] ?: 0L
-                            FileUtils.delete(folder, true)
-                            totalSize -= size
-                            if (totalSize <= maxSize) break
-                        }
-                    }
-                }
-            }
-
             FileUtils.delete(ArchiveUtils.TEMP_PATH)
-            val filesDir = appCtx.filesDir
+            val filesDir = App.instance.filesDir
             FileUtils.delete(File(filesDir, "shareBookSource.json").absolutePath)
             FileUtils.delete(File(filesDir, "shareRssSource.json").absolutePath)
             FileUtils.delete(File(filesDir, "books.json").absolutePath)
         }
     }
 
+    /** 保存正文并发通知, 逻辑下沉 [BookHelpShared.saveContent] (bookSource 仅保留签名兼容)。 */
     fun saveContent(
         bookSource: BookSource,
         book: Book,
         bookChapter: BookChapter,
         content: String
     ) {
-        try {
-            saveText(book, bookChapter, content)
-            //saveImages(bookSource, book, bookChapter, content)
-            postEvent(EventBus.SAVE_CONTENT, Pair(book, bookChapter))
-        } catch (e: Exception) {
-            e.printStackTrace()
-            AppLog.put("保存正文失败 ${book.name} ${bookChapter.title}", e)
-        }
+        BookHelpShared.saveContent(book, bookChapter, content)
     }
 
+    /**
+     * 保存章节正文到缓存文件。
+     *
+     * 字数统计下沉 [BookHelpShared.upWordCount] (内部 runBlocking 写库, 全部调用方均在 IO 协程内)。
+     */
     fun saveText(
         book: Book,
         bookChapter: BookChapter,
@@ -193,16 +134,12 @@ object BookHelp {
             book.getFolderName(),
             bookChapter.getFileName(),
         ).writeText(content)
-        if (book.isOnLineTxt && AppConfig.tocCountWords) {
-            val wordCount = StringUtils.wordCountFormat(content.length)
-            bookChapter.wordCount = wordCount
-            appDb.bookChapterDao.upWordCount(bookChapter.bookUrl, bookChapter.url, wordCount)
-        }
+        BookHelpShared.upWordCount(book, bookChapter, content)
     }
 
     fun flowImages(bookChapter: BookChapter, content: String): Flow<String> {
         return flow {
-            val imgList = ChapterContentParser.extractImages(content)
+            val imgList = ChapterContentParserShared.extractImages(content)
             for (i in imgList) {
                 if (i.src.isBlank()) continue
                 emit(i.src)
@@ -272,7 +209,7 @@ object BookHelp {
             cacheFolderName,
             book.getFolderName(),
             cacheImageFolderName,
-            "${MD5Utils.md5Encode16(src)}.${getImageSuffix(src)}"
+            BookHelpLogic.imageFileName(src)
         )
     }
 
@@ -286,30 +223,8 @@ object BookHelp {
         return getImage(book, src).exists()
     }
 
-    fun getImageSuffix(src: String): String {
-        return UrlUtil.getSuffix(src, "jpg")
-    }
-
-    @Throws(IOException::class, FileNotFoundException::class)
-    fun getEpubFile(book: Book): ZipFile {
-        val uri = book.getLocalUri()
-        if (uri.isContentScheme()) {
-            FileUtils.createFolderIfNotExist(downloadDir, cacheEpubFolderName)
-            val path = FileUtils.getPath(downloadDir, cacheEpubFolderName, book.originName)
-            val file = File(path)
-            val doc = DocumentFile.fromSingleUri(appCtx, uri)
-                ?: throw IOException("文件不存在")
-            if (!file.exists() || doc.lastModified() > book.latestChapterTime) {
-                FileBook.getBookInputStream(book).use { inputStream ->
-                    FileOutputStream(file).use { outputStream ->
-                        inputStream.copyTo(outputStream)
-                    }
-                }
-            }
-            return ZipFile(file)
-        }
-        return ZipFile(uri.path)
-    }
+    fun getImageSuffix(src: String): String =
+        BookHelpLogic.getImageSuffix(src)
 
     /**
      * 获取本地书籍文件的ParcelFileDescriptor
@@ -320,6 +235,11 @@ object BookHelp {
     @Throws(IOException::class, FileNotFoundException::class)
     fun getBookPFD(book: Book): ParcelFileDescriptor? {
         if (book.bookUrl.startsWith(BookType.webDavTag)) {
+            // ProxyFileDescriptorCallback/openProxyFileDescriptor 是 API 26+ (minSdk 24),
+            // 低版本无此能力, 返回 null 由调用方走降级/报错, 避免类加载崩溃
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                return null
+            }
             val webDavUrl = book.getRemoteUrl()!!
             val webdav = kotlin.runCatching {
                 io.legado.app.lib.webdav.WebDav.fromPath(webDavUrl)
@@ -330,7 +250,7 @@ object BookHelp {
             }
             val size = kotlinx.coroutines.runBlocking { webdav.getWebDavFile()?.size } ?: 0L
             val storageManager =
-                appCtx.getSystemService(android.os.storage.StorageManager::class.java)
+                App.instance.getSystemService(android.os.storage.StorageManager::class.java)
             val handlerThread = android.os.HandlerThread("WebDavPfd")
             handlerThread.start()
             val handler = android.os.Handler(handlerThread.looper)
@@ -342,7 +262,7 @@ object BookHelp {
         }
         val uri = book.getLocalUri()
         return if (uri.isContentScheme()) {
-            appCtx.contentResolver.openFileDescriptor(uri, "r")
+            App.instance.contentResolver.openFileDescriptor(uri, "r")
         } else {
             ParcelFileDescriptor.open(File(uri.path!!), ParcelFileDescriptor.MODE_READ_ONLY)
         }
@@ -350,7 +270,7 @@ object BookHelp {
 
     fun getChapterFiles(book: Book): HashSet<String> {
         val fileNames = hashSetOf<String>()
-        if (book.isLocalTxt || book.isVideo || book.isAudio) {
+        if (BookHelpShared.shouldSkipChapterFiles(book)) {
             return fileNames
         }
         FileUtils.createFolderIfNotExist(
@@ -363,12 +283,27 @@ object BookHelp {
     }
 
     /**
+     * 书籍缓存目录下按文件名取文件 (`.nr` 标记等), 供 [AndroidBookStorage] 的 cache-file 原语委托。
+     */
+    fun getCacheFile(book: Book, fileName: String): File {
+        return downloadDir.getFile(cacheFolderName, book.getFolderName(), fileName)
+    }
+
+    /** 同 [getCacheFile], 但确保文件及父目录已创建。 */
+    fun createCacheFile(book: Book, fileName: String): File {
+        return FileUtils.createFileIfNotExist(
+            downloadDir,
+            cacheFolderName,
+            book.getFolderName(),
+            fileName
+        )
+    }
+
+    /**
      * 检测该章节是否下载
      */
     fun hasContent(book: Book, bookChapter: BookChapter): Boolean {
-        return if (book.isLocalTxt ||
-            (bookChapter.isVolume && bookChapter.url.startsWith(bookChapter.title))
-        ) {
+        return if (BookHelpShared.shouldSkipHasContent(book, bookChapter)) {
             true
         } else {
             downloadDir.exists(
@@ -390,7 +325,7 @@ object BookHelp {
         val op = BitmapFactory.Options()
         op.inJustDecodeBounds = true
         getContent(book, bookChapter)?.let {
-            val imgList = ChapterContentParser.extractImages(it)
+            val imgList = ChapterContentParserShared.extractImages(it)
             for (i in imgList) {
                 val src = i.src
                 val image = getImage(book, src)
@@ -422,29 +357,11 @@ object BookHelp {
     }
 
     /**
-     * 读取章节内容
+     * 读取章节内容, 逻辑下沉 [BookHelpShared.getContent]
+     * (缓存文件读取经 [AndroidBookStorage] 回落到本类的 cache-file 原语)。
      */
     fun getContent(book: Book, bookChapter: BookChapter): String? {
-        val file = downloadDir.getFile(
-            cacheFolderName,
-            book.getFolderName(),
-            bookChapter.getFileName()
-        )
-        if (file.exists()) {
-            val string = file.readText()
-            if (string.isEmpty()) {
-                return null
-            }
-            return string
-        }
-        if (book.isLocal) {
-            val string = FileBook.getContent(book, bookChapter)
-            if (string != null && book.isEpub) {
-                saveText(book, bookChapter, string)
-            }
-            return string
-        }
-        return null
+        return BookHelpShared.getContent(book, bookChapter)
     }
 
     /**
@@ -461,26 +378,16 @@ object BookHelp {
 
     /**
      * 设置是否禁用正文的去除重复标题,针对单个章节
+     *
+     * 标记文件读写下沉 [BookHelpShared.setRemoveSameTitleMarker], 本端另同步 ContentProcessor 缓存。
      */
     fun setRemoveSameTitle(book: Book, bookChapter: BookChapter, removeSameTitle: Boolean) {
         val fileName = bookChapter.getFileName("nr")
         val contentProcessor = ContentProcessor.get(book)
+        BookHelpShared.setRemoveSameTitleMarker(book, bookChapter, removeSameTitle)
         if (removeSameTitle) {
-            val path = FileUtils.getPath(
-                downloadDir,
-                cacheFolderName,
-                book.getFolderName(),
-                fileName
-            )
             contentProcessor.removeSameTitleCache.remove(fileName)
-            File(path).delete()
         } else {
-            FileUtils.createFileIfNotExist(
-                downloadDir,
-                cacheFolderName,
-                book.getFolderName(),
-                fileName
-            )
             contentProcessor.removeSameTitleCache.add(fileName)
         }
     }
@@ -489,23 +396,14 @@ object BookHelp {
      * 获取是否去除重复标题
      */
     fun removeSameTitle(book: Book, bookChapter: BookChapter): Boolean {
-        val path = FileUtils.getPath(
-            downloadDir,
-            cacheFolderName,
-            book.getFolderName(),
-            bookChapter.getFileName("nr")
-        )
-        return !File(path).exists()
+        return BookHelpShared.removeSameTitle(book, bookChapter)
     }
 
     /**
      * 格式化作者
      */
-    fun formatBookAuthor(author: String): String {
-        return author
-            .replace(AppPattern.authorRegex, "")
-            .trim()
-    }
+    fun formatBookAuthor(author: String): String =
+        BookHelpLogic.formatBookAuthor(author)
 
     /**
      * 根据目录名获取当前章节
@@ -515,111 +413,16 @@ object BookHelp {
         oldDurChapterName: String?,
         newChapterList: List<BookChapter>,
         oldChapterListSize: Int = 0
-    ): Int {
-        if (oldDurChapterIndex <= 0) return 0
-        if (newChapterList.isEmpty()) return oldDurChapterIndex
-        val oldChapterNum = getChapterNum(oldDurChapterName)
-        val oldName = getPureChapterName(oldDurChapterName)
-        val newChapterSize = newChapterList.size
-        val durIndex =
-            if (oldChapterListSize == 0) oldDurChapterIndex
-            else oldDurChapterIndex * oldChapterListSize / newChapterSize
-        val min = max(0, min(oldDurChapterIndex, durIndex) - 10)
-        val max = min(newChapterSize - 1, max(oldDurChapterIndex, durIndex) + 10)
-        var nameSim = 0.0
-        var newIndex = 0
-        var newNum = 0
-        if (oldName.isNotEmpty()) {
-            for (i in min..max) {
-                val newName = getPureChapterName(newChapterList[i].title)
-                val temp = EscapeUtils.jaccardSimilarity(oldName, newName)
-                if (temp > nameSim) {
-                    nameSim = temp
-                    newIndex = i
-                }
-            }
-        }
-        if (nameSim < 0.96 && oldChapterNum > 0) {
-            for (i in min..max) {
-                val temp = getChapterNum(newChapterList[i].title)
-                if (temp == oldChapterNum) {
-                    newNum = temp
-                    newIndex = i
-                    break
-                } else if (abs(temp - oldChapterNum) < abs(newNum - oldChapterNum)) {
-                    newNum = temp
-                    newIndex = i
-                }
-            }
-        }
-        return if (nameSim > 0.96 || abs(newNum - oldChapterNum) < 1) {
-            newIndex
-        } else {
-            min(max(0, newChapterList.size - 1), oldDurChapterIndex)
-        }
-    }
+    ): Int = BookHelpLogic.getDurChapter(
+        oldDurChapterIndex,
+        oldDurChapterName,
+        newChapterList,
+        oldChapterListSize
+    )
 
     fun getDurChapter(
         oldBook: Book,
         newChapterList: List<BookChapter>
-    ): Int {
-        return oldBook.run {
-            getDurChapter(durChapterIndex, durChapterTitle, newChapterList, totalChapterNum)
-        }
-    }
-
-    private val chapterNamePattern1 by lazy {
-        Pattern.compile(
-            ".*?第([\\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+)[章节篇回集话]"
-        )
-    }
-
-    @Suppress("RegExpSimplifiable")
-    private val chapterNamePattern2 by lazy {
-        Pattern.compile(
-            "^(?:[\\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+[,:、])*([\\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+)(?:[,:、]|\\.[^\\d])"
-        )
-    }
-
-    private val regexA by lazy {
-        return@lazy "\\s".toRegex()
-    }
-
-    private fun getChapterNum(chapterName: String?): Int {
-        chapterName ?: return -1
-        val chapterName1 = StringUtils.fullToHalf(chapterName).replace(regexA, "")
-        return StringUtils.stringToInt(
-            (
-                chapterNamePattern1.matcher(chapterName1).takeIf { it.find() }
-                    ?: chapterNamePattern2.matcher(chapterName1).takeIf { it.find() }
-                )?.group(1)
-                ?: "-1"
-        )
-    }
-
-    private val regexOther by lazy {
-        // 所有非字母数字中日韩文字 CJK区+扩展A-F区
-        @Suppress("RegExpDuplicateCharacterInClass")
-        return@lazy "[^\\w\\u4E00-\\u9FEF〇\\u3400-\\u4DBF\\u20000-\\u2A6DF\\u2A700-\\u2EBEF]".toRegex()
-    }
-
-    @Suppress("RegExpUnnecessaryNonCapturingGroup", "RegExpSimplifiable")
-    private val regexB by lazy {
-        //章节序号，排除处于结尾的状况，避免将章节名替换为空字串
-        return@lazy "^.*?第(?:[\\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+)[章节篇回集话](?!$)|^(?:[\\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+[,:、])*(?:[\\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+)(?:[,:、](?!$)|\\.(?=[^\\d]))".toRegex()
-    }
-
-    private val regexC by lazy {
-        //前后附加内容，整个章节名都在括号中时只剔除首尾括号，避免将章节名替换为空字串
-        return@lazy "(?!^)(?:[〖【《〔\\[{(][^〖【《〔\\[{()〕》】〗\\]}]+)?[)〕》】〗\\]}]$|^[〖【《〔\\[{(](?:[^〖【《〔\\[{()〕》】〗\\]}]+[〕》】〗\\]})])?(?!$)".toRegex()
-    }
-
-    private fun getPureChapterName(chapterName: String?): String {
-        return if (chapterName == null) "" else StringUtils.fullToHalf(chapterName)
-            .replace(regexA, "")
-            .replace(regexB, "")
-            .replace(regexC, "")
-            .replace(regexOther, "")
-    }
+    ): Int = BookHelpLogic.getDurChapter(oldBook, newChapterList)
 
 }

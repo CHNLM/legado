@@ -3,16 +3,16 @@ package io.legado.app.help.config
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import io.legado.app.App
 import io.legado.app.utils.getBoolean
 import io.legado.app.utils.putBoolean
 import io.legado.app.utils.putLong
 import io.legado.app.utils.putString
 import io.legado.app.utils.remove
-import splitties.init.appCtx
 
 @Suppress("ConstPropertyName")
 object LocalConfig : SharedPreferences
-by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
+by App.instance.getSharedPreferences("local", Context.MODE_PRIVATE) {
 
     private const val versionCodeKey = "appVersionCode"
 
@@ -33,12 +33,6 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
         get() = getLong("lastBackup", 0)
         set(value) {
             putLong("lastBackup", value)
-        }
-
-    var privacyPolicyOk: Boolean
-        get() = getBoolean("privacyPolicyOk")
-        set(value) {
-            putBoolean("privacyPolicyOk", value)
         }
 
     val readHelpVersionIsLast: Boolean
@@ -78,37 +72,36 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
         }
 
     val isFirstOpenApp: Boolean
-        get() {
-            val value = getBoolean("firstOpen", true)
-            if (value) {
-                edit { putBoolean("firstOpen", false) }
-            }
-            return value
-        }
+        get() = LocalConfigShared.isFirstOpen(
+            getBoolean = { k, d -> getBoolean(k, d) },
+            putBoolean = { k, v -> edit { putBoolean(k, v) } }
+        )
 
     @Suppress("SameParameterValue")
     private fun isLastVersion(
         lastVersion: Int,
         versionKey: String,
         firstOpenKey: String? = null
-    ): Boolean {
-        var version = getInt(versionKey, 0)
-        if (version == 0 && firstOpenKey != null) {
-            if (!getBoolean(firstOpenKey, true)) {
-                version = 1
-            }
-        }
-        if (version < lastVersion) {
-            edit { putInt(versionKey, lastVersion) }
-            return false
-        }
-        return true
-    }
+    ): Boolean = LocalConfigShared.isLastVersion(
+        lastVersion, versionKey, firstOpenKey,
+        getInt = { k, d -> getInt(k, d) },
+        getBoolean = { k, d -> getBoolean(k, d) },
+        putInt = { k, v -> edit { putInt(k, v) } }
+    )
 
     var deleteBookOriginal: Boolean
         get() = getBoolean("deleteBookOriginal")
         set(value) {
             putBoolean("deleteBookOriginal", value)
+        }
+
+    /**
+     * 是否已同意隐私协议 (首启弹窗同意后置 true, 拒绝则退出应用)
+     */
+    var privacyPolicyOk: Boolean
+        get() = getBoolean("privacyPolicyOk")
+        set(value) {
+            putBoolean("privacyPolicyOk", value)
         }
 
     var appCrash: Boolean

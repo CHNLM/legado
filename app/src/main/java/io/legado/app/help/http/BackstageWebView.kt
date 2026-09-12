@@ -11,10 +11,12 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import io.legado.app.App
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppConst.timeLimit
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.getUserAgent
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.utils.EscapeUtils
 import io.legado.app.utils.runOnUI
@@ -25,13 +27,16 @@ import kotlinx.coroutines.withTimeout
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
-import splitties.init.appCtx
 import java.lang.ref.WeakReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
  * 后台webView
+ *
+ * P1-1a: 实现 [BackstageWebViewHandle] 接口, 让 AnalyzeUrl 经
+ * [BackstageWebViewProviders] 工厂注入, 不直接 new 本类。
+ * 实现层仍留 app(android.webkit.WebView 绑定)。
  */
 class BackstageWebView(
     private val url: String? = null,
@@ -43,13 +48,13 @@ class BackstageWebView(
     private val overrideUrlRegex: String? = null,
     private val javaScript: String? = null,
     private val delayTime: Long = 1000L,
-) {
+) : BackstageWebViewHandle {
 
     private val mHandler = Handler(Looper.getMainLooper())
     private var callback: Callback? = null
     private var mWebView: WebView? = null
 
-    suspend fun getStrResponse(): StrResponse = withTimeout(timeLimit) {
+    override suspend fun getStrResponse(): StrResponse = withTimeout(timeLimit) {
         suspendCancellableCoroutine { block ->
             block.invokeOnCancellation {
                 runOnUI {
@@ -107,12 +112,12 @@ class BackstageWebView(
 
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     private fun createWebView(): WebView {
-        val webView = WebView(appCtx)
+        val webView = WebView(App.instance)
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.blockNetworkImage = true
-        settings.userAgentString = headerMap?.get(AppConst.UA_NAME) ?: AppConfig.userAgent
+        settings.userAgentString = headerMap.getUserAgent { AppConfig.userAgent }
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         if (sourceRegex.isNullOrBlank() && overrideUrlRegex.isNullOrBlank()) {
             webView.webViewClient = HtmlWebViewClient()

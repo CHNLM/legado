@@ -7,39 +7,41 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import io.legado.app.App
 import io.legado.app.R
 import io.legado.app.base.BaseService
 import io.legado.app.constant.AppConst
-import io.legado.app.constant.EventBus
 import io.legado.app.constant.IntentAction
 import io.legado.app.constant.NotificationId
-import io.legado.app.constant.PreferKey
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.i18n.androidAppString
 import io.legado.app.help.setLiveOngoing
+import io.legado.app.powerManager
 import io.legado.app.receiver.NetworkChangedListener
 import io.legado.app.utils.NetworkUtils
-import io.legado.app.utils.getPrefBoolean
-import io.legado.app.utils.getPrefInt
-import io.legado.app.utils.postEvent
-import io.legado.app.utils.printOnDebug
 import io.legado.app.utils.sendToClip
 import io.legado.app.utils.servicePendingIntent
 import io.legado.app.utils.startForegroundServiceCompat
 import io.legado.app.utils.startService
 import io.legado.app.utils.stopService
 import io.legado.app.utils.toastOnUi
-import io.legado.app.web.HttpServer
-import io.legado.app.web.WebSocketServer
-import splitties.init.appCtx
-import splitties.systemservices.powerManager
-import splitties.systemservices.wifiManager
-import java.io.IOException
+import io.legado.app.web.WebServerManager
+import io.legado.app.wifiManager
 
+/**
+ * Web 服务 Android Service 壳。
+ *
+ * # 下沉说明 (原 app 端 io.legado.app.service.WebService)
+ * 服务器生命周期 (HttpServer + WebSocketServer 起/停 + IP 枚举 + isRun/hostAddress 状态)
+ * 已下沉到 shared commonMain [WebServerManager] + [io.legado.app.web.JvmWebServerPlatform];
+ * 本类只保留 Android Service 壳 (wakelock/wifiLock/前台通知/网络监听/Tile), 对齐原行为。
+ *
+ * # companion 委托
+ * start/stop/serve 保留原 Service 启停入口 (Android Service 机制)。
+ */
 class WebService : BaseService() {
 
     companion object {
-        var isRun = false
-        var hostAddress = ""
-
         fun start(context: Context) {
             context.startService<WebService>()
         }
@@ -54,13 +56,13 @@ class WebService : BaseService() {
         }
 
         fun serve() {
-            appCtx.startService<WebService> {
+            App.instance.startService<WebService> {
                 action = "serve"
             }
         }
     }
 
-    private val useWakeLock = appCtx.getPrefBoolean(PreferKey.webServiceWakeLock, false)
+    private val useWakeLock = AppConfig.webServiceWakeLock
     private val wakeLock: PowerManager.WakeLock by lazy {
         powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "legado:WebService")
             .apply {
@@ -69,14 +71,12 @@ class WebService : BaseService() {
     }
     private val wifiLock by lazy {
         @Suppress("DEPRECATION")
-        wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "legado:WebService")
+        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "legado:WebService")
             ?.apply {
                 setReferenceCounted(false)
             }
     }
-    private var httpServer: HttpServer? = null
-    private var webSocketServer: WebSocketServer? = null
-    private var notificationList = mutableListOf(appCtx.getString(R.string.service_starting))
+    private var notificationList = mutableListOf(androidAppString("service_starting"))
     private val networkChangedListener by lazy {
         NetworkChangedListener(this)
     }
@@ -88,27 +88,30 @@ class WebService : BaseService() {
             wakeLock.acquire()
             wifiLock?.acquire()
         }
-        isRun = true
         upTile(true)
+        // 对齐原版 onCreate 的 isRun = true (服务器起之前 UI 即显示运行中)
+        WebServerManager.markRunning()
         networkChangedListener.register()
         networkChangedListener.onNetworkChanged = {
+            // 网络变化: 重新枚举 IP → 更新 WebServerManager 地址 → 刷新前台通知
+            // (原 app 端行为: 不重启 HttpServer, 仅更新 notificationList + hostAddress + postEvent)
             val addressList = NetworkUtils.getLocalIPAddress()
-            notificationList.clear()
-            if (addressList.any()) {
-                notificationList.addAll(addressList.map { address ->
-                    getString(
-                        R.string.http_ip,
-                        address.hostAddress,
-                        getPort()
-                    )
-                })
-                hostAddress = notificationList.first()
+            val port = WebServerManager.getPort()
+            val addresses = if (addressList.any()) {
+                addressList.map { "http://${it.hostAddress}:$port" }
             } else {
-                hostAddress = getString(R.string.network_connection_unavailable)
-                notificationList.add(hostAddress)
+                emptyList()
+            }
+            // 无可用 IP 时 hostAddress 置本地化文案 (对齐原版, 供通知/复制/EventBus 消费方显示)
+            val unavailableText = androidAppString("network_connection_unavailable")
+            WebServerManager.updateAddresses(addresses, unavailableText)
+            notificationList.clear()
+            if (addresses.isNotEmpty()) {
+                notificationList.addAll(addresses)
+            } else {
+                notificationList.add(unavailableText)
             }
             startForegroundNotification()
-            postEvent(EventBus.WEB_SERVICE, hostAddress)
         }
     }
 
@@ -116,7 +119,7 @@ class WebService : BaseService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             IntentAction.stop -> stopSelf()
-            "copyHostAddress" -> sendToClip(hostAddress)
+            "copyHostAddress" -> sendToClip(WebServerManager.hostAddress)
             "serve" -> if (useWakeLock) {
                 wakeLock.acquire()
                 wifiLock?.acquire()
@@ -134,61 +137,24 @@ class WebService : BaseService() {
             wifiLock?.release()
         }
         networkChangedListener.unRegister()
-        isRun = false
-        if (httpServer?.isAlive == true) {
-            httpServer?.stop()
-        }
-        if (webSocketServer?.isAlive == true) {
-            webSocketServer?.stop()
-        }
-        postEvent(EventBus.WEB_SERVICE, "")
+        // 服务器停止 + isRun/hostAddress 清空 + postEvent 委托 WebServerManager
+        WebServerManager.stop()
         upTile(false)
     }
 
     private fun upWebServer() {
-        if (httpServer?.isAlive == true) {
-            httpServer?.stop()
-        }
-        if (webSocketServer?.isAlive == true) {
-            webSocketServer?.stop()
-        }
-        val addressList = NetworkUtils.getLocalIPAddress()
-        if (addressList.any()) {
-            val port = getPort()
-            httpServer = HttpServer(port)
-            webSocketServer = WebSocketServer(port + 1)
-            try {
-                httpServer?.start()
-                webSocketServer?.start(AppConst.timeLimit.toInt()) // 通信超时设置
-                notificationList.clear()
-                notificationList.addAll(addressList.map { address ->
-                    getString(
-                        R.string.http_ip,
-                        address.hostAddress,
-                        getPort()
-                    )
-                })
-                hostAddress = notificationList.first()
-                isRun = true
-                postEvent(EventBus.WEB_SERVICE, hostAddress)
-                startForegroundNotification()
-            } catch (e: IOException) {
-                toastOnUi(e.localizedMessage ?: "")
-                e.printOnDebug()
-                stopSelf()
-            }
-        } else {
-            toastOnUi("web service cant start, no ip address")
+        // 服务器起/停 + IP 枚举 + isRun/hostAddress 状态 + postEvent 委托 WebServerManager
+        val result = WebServerManager.startWithResult()
+        val addresses = result.addresses
+        if (addresses.isEmpty()) {
+            // 对齐原版: 绑定异常 toast e.localizedMessage, 无可用 IP 才提示 no ip address
+            toastOnUi(result.errorMsg ?: "web service cant start, no ip address")
             stopSelf()
+        } else {
+            notificationList.clear()
+            notificationList.addAll(addresses)
+            startForegroundNotification()
         }
-    }
-
-    private fun getPort(): Int {
-        var port = getPrefInt(PreferKey.webPort, 1122)
-        if (port !in 1024..65530) {
-            port = 1122
-        }
-        return port
     }
 
     /**
@@ -199,14 +165,14 @@ class WebService : BaseService() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setSmallIcon(R.drawable.ic_web_service_noti)
             .setOngoing(true)
-            .setContentTitle(getString(R.string.web_service))
+            .setContentTitle(androidAppString("web_service"))
             .setContentText(notificationList.joinToString("\n"))
             .setContentIntent(
                 servicePendingIntent<WebService>("copyHostAddress")
             )
         builder.addAction(
             R.drawable.ic_stop_black_24dp,
-            getString(R.string.cancel),
+            androidAppString("cancel"),
             servicePendingIntent<WebService>(IntentAction.stop)
         )
         // Web 服务为常驻运行态而非确定进度的"旅程", 故只请求实时进行中胶囊;

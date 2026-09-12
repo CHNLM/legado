@@ -2,9 +2,11 @@
 
 package io.legado.app.lib.cronet
 
+import android.net.http.X509TrustManagerExtensions
 import androidx.annotation.Keep
-import io.legado.app.help.http.CookieManager.cookieJarHeader
+import io.legado.app.App
 import io.legado.app.help.http.SSLHelper
+import io.legado.app.help.http.cookieJarHeader
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.externalCache
@@ -17,9 +19,13 @@ import org.chromium.net.ExperimentalCronetEngine
 import org.chromium.net.UploadDataProvider
 import org.chromium.net.UrlRequest
 import org.json.JSONObject
-import splitties.init.appCtx
 
 internal const val BUFFER_SIZE = 32 * 1024
+
+// unsafeTrustManagerExtensions 依赖 Android 独有的 X509TrustManagerExtensions, 仅 Cronet 使用, 内联于此
+private val unsafeTrustManagerExtensions by lazy {
+    X509TrustManagerExtensions(SSLHelper.unsafeTrustManager)
+}
 
 private var cronetEngineCache: ExperimentalCronetEngine? = null
 private var cronetEngineInitialized = false
@@ -29,7 +35,7 @@ val cronetEngine: ExperimentalCronetEngine?
         if (cronetEngineInitialized) {
             return cronetEngineCache
         }
-        synchronized(appCtx) {
+        synchronized(App.instance) {
             if (cronetEngineInitialized) {
                 return cronetEngineCache
             }
@@ -44,15 +50,15 @@ private fun createCronetEngine(): ExperimentalCronetEngine? {
         val x509UtilClass = Class.forName("org.chromium.net.impl.X509Util")
         val sDefaultTrustManager = x509UtilClass.getDeclaredField("sDefaultTrustManager")
         sDefaultTrustManager.isAccessible = true
-        sDefaultTrustManager.set(null, SSLHelper.unsafeTrustManagerExtensions)
+        sDefaultTrustManager.set(null, unsafeTrustManagerExtensions)
         val sTestTrustManager = x509UtilClass.getDeclaredField("sTestTrustManager")
         sTestTrustManager.isAccessible = true
-        sTestTrustManager.set(null, SSLHelper.unsafeTrustManagerExtensions)
+        sTestTrustManager.set(null, unsafeTrustManagerExtensions)
     }.onFailure {
         LogUtils.d("Cronet", "Failed to disable cert verify: ${it.message}")
     }
 
-    val providers = CronetProvider.getAllProviders(appCtx)
+    val providers = CronetProvider.getAllProviders(App.instance)
 
     // 1. 优先尝试系统原生 HttpEngine (Android 14+) 或其他外部 Provider (GMS 等)
     providers.find {
@@ -94,7 +100,7 @@ private fun createCronetEngine(): ExperimentalCronetEngine? {
 }
 
 private fun ExperimentalCronetEngine.Builder.applyConfig() {
-    setStoragePath(appCtx.externalCache.absolutePath)
+    setStoragePath(App.instance.externalCache.absolutePath)
     enableHttpCache(HTTP_CACHE_DISK, (1024 * 1024 * 50).toLong())
     enableQuic(true)
     enableHttp2(true)
@@ -147,9 +153,8 @@ fun buildRequest(request: Request, callback: UrlRequest.Callback): UrlRequest? {
             } else {
                 BodyUploadProvider(requestBody)
             }
-            provider.use {
-                this.setUploadDataProvider(it, okHttpClient.dispatcher.executorService)
-            }
+            // provider 生命周期由 Cronet 管理, 不能提前 close
+            setUploadDataProvider(provider, okHttpClient.dispatcher.executorService)
 
         }
 

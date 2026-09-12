@@ -1,5 +1,6 @@
 package io.legado.app.utils
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,16 +9,16 @@ import android.os.ParcelFileDescriptor
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
 import androidx.fragment.app.Fragment
-import io.legado.app.R
+import io.legado.app.App
 import io.legado.app.constant.AppLog
 import io.legado.app.exception.NoStackTraceException
+import io.legado.app.help.i18n.androidAppString
 import io.legado.app.lib.permission.Permissions
 import io.legado.app.lib.permission.PermissionsCompat
 import okhttp3.MediaType
 import okhttp3.RequestBody
 import okio.BufferedSink
 import okio.source
-import splitties.init.appCtx
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -32,6 +33,7 @@ fun Uri.isFileScheme() = this.scheme == "file"
 /**
  * 读取URI
  */
+@SuppressLint("Recycle") // openInputStream 由下方 .use 关闭, lint 追踪不到回调内传递的流
 fun AppCompatActivity.readUri(
     uri: Uri?,
     success: (fileDoc: FileDoc, inputStream: InputStream) -> Unit
@@ -48,7 +50,7 @@ fun AppCompatActivity.readUri(
         } else {
             PermissionsCompat.Builder()
                 .addPermissions(*Permissions.Group.STORAGE)
-                .rationale(R.string.get_storage_per)
+                .rationale(androidAppString("get_storage_per"))
                 .onGranted {
                     RealPathUtil.getPath(this, uri)?.let { path ->
                         val file = File(path)
@@ -72,6 +74,7 @@ fun AppCompatActivity.readUri(
 /**
  * 读取URI
  */
+@SuppressLint("Recycle") // openInputStream 由下方 .use 关闭, lint 追踪不到回调内传递的流
 fun Fragment.readUri(uri: Uri?, success: (fileDoc: FileDoc, inputStream: InputStream) -> Unit) {
     uri ?: return
     try {
@@ -85,7 +88,7 @@ fun Fragment.readUri(uri: Uri?, success: (fileDoc: FileDoc, inputStream: InputSt
         } else {
             PermissionsCompat.Builder()
                 .addPermissions(*Permissions.Group.STORAGE)
-                .rationale(R.string.get_storage_per)
+                .rationale(androidAppString("get_storage_per"))
                 .onGranted {
                     RealPathUtil.getPath(requireContext(), uri)?.let { path ->
                         val file = File(path)
@@ -136,9 +139,8 @@ fun Uri.writeBytes(
     byteArray: ByteArray
 ): Boolean {
     if (this.isContentScheme()) {
-        context.contentResolver.openOutputStream(this)?.let {
+        context.contentResolver.openOutputStream(this)?.use {
             it.write(byteArray)
-            it.close()
             return true
         }
         return false
@@ -296,12 +298,12 @@ fun Uri.toRequestBody(contentType: MediaType? = null): RequestBody {
         override fun contentType() = contentType
 
         override fun contentLength(): Long {
-            val length = uri.inputStream(appCtx).getOrThrow().available().toLong()
+            val length = uri.inputStream(App.instance).getOrThrow().available().toLong()
             return if (length > 0) length else -1
         }
 
         override fun writeTo(sink: BufferedSink) {
-            uri.inputStream(appCtx).getOrThrow().source().use { source ->
+            uri.inputStream(App.instance).getOrThrow().source().use { source ->
                 sink.writeAll(source)
             }
         }
@@ -309,7 +311,7 @@ fun Uri.toRequestBody(contentType: MediaType? = null): RequestBody {
 }
 
 fun Uri.canRead(): Boolean {
-    return appCtx.checkSelfUriPermission(
+    return App.instance.checkSelfUriPermission(
         this,
         Intent.FLAG_GRANT_READ_URI_PERMISSION
     ) == PackageManager.PERMISSION_GRANTED

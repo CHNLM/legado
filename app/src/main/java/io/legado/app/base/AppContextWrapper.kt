@@ -7,6 +7,7 @@ import android.content.res.Resources
 import android.os.Build
 import android.os.LocaleList
 import io.legado.app.constant.PreferKey
+import io.legado.app.help.config.fontScaleFromLevel
 import io.legado.app.utils.getPrefInt
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.sysConfiguration
@@ -16,11 +17,17 @@ import java.util.Locale
 @Suppress("unused")
 object AppContextWrapper {
 
-    @SuppressLint("ObsoleteSdkInt")
+    @SuppressLint("ObsoleteSdkInt", "AppBundleLocaleChanges")
     fun wrap(context: Context): Context {
         val resources: Resources = context.resources
         val configuration: Configuration = resources.configuration
         val targetLocale = getSetLocale(context)
+        // 迁移后 R.string 已删除, 多语言统一走 shared composeResources (CMP 通道读
+        // Locale.getDefault() 选 locale: Composable 的 Locale.current 与 suspend 的
+        // getSystemEnvironment 均源自它)。createConfigurationContext 只影响旧 R.string
+        // 资源, 故此处同步设置进程级 Locale, 保证 CMP 三通道与 R.string 时代语言一致
+        // (attachBaseContext 主线程执行, 早于任何资源读取)。
+        Locale.setDefault(targetLocale)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             configuration.setLocale(targetLocale)
             configuration.setLocales(LocaleList(targetLocale))
@@ -32,13 +39,8 @@ object AppContextWrapper {
         return context.createConfigurationContext(configuration)
     }
 
-    fun getFontScale(context: Context): Float {
-        var fontScale = context.getPrefInt(PreferKey.fontScale) / 10f
-        if (fontScale !in 0.8f..1.6f) {
-            fontScale = sysConfiguration.fontScale
-        }
-        return fontScale
-    }
+    fun getFontScale(context: Context): Float =
+        fontScaleFromLevel(context.getPrefInt(PreferKey.fontScale)) ?: sysConfiguration.fontScale
 
     /**
      * 当前系统语言

@@ -12,20 +12,20 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.PorterDuffXfermode
 import android.graphics.Shader
-import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
-import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
-import java.security.MessageDigest
+import androidx.core.graphics.createBitmap
+import coil3.size.Size
+import coil3.size.pxOrElse
+import coil3.transform.Transformation
 
 /**
  * 详情页背景专用转换：顶部微遮 + 底部透明渐变 + 暗化蒙层
  * 优化版：通过 ComposeShader 合并绘制步骤，减少像素遍历次数和对象分配
  * 渐变分区：顶部 30% 清晰 → 30%-65% 柔和过渡 → 65%-100% 加速淡出
  */
-class BookInfoBgTransformation : BitmapTransformation() {
+class BookInfoBgTransformation(private val land: Boolean = false) : Transformation() {
 
     companion object {
         private const val ID = "io.legado.app.ui.book.info.BookInfoBgTransformation"
-        private val idBytes = ID.toByteArray()
 
         private val GRADIENT_COLORS = intArrayOf(
             Color.BLACK,                     // 0f 封面主体完全清晰
@@ -46,15 +46,6 @@ class BookInfoBgTransformation : BitmapTransformation() {
 
         private val SRC_XFERMODE = PorterDuffXfermode(PorterDuff.Mode.SRC)
 
-        private val threadGradient = ThreadLocal.withInitial {
-            LinearGradient(
-                0f, 0f, 0f, 1f,
-                GRADIENT_COLORS,
-                GRADIENT_STOPS,
-                Shader.TileMode.CLAMP
-            )
-        }
-
         private val threadPaint = ThreadLocal.withInitial {
             Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
         }
@@ -62,33 +53,43 @@ class BookInfoBgTransformation : BitmapTransformation() {
         private val threadMatrix = ThreadLocal.withInitial { Matrix() }
     }
 
-    override fun transform(
-        pool: BitmapPool,
-        toTransform: Bitmap,
-        outWidth: Int,
-        outHeight: Int,
-    ): Bitmap {
-        val width = toTransform.width
-        val height = toTransform.height
+    override val cacheKey: String = "$ID-$land"
 
-        // 使用 getDirty 配合 SRC 模式，比 get 更高效且能完全覆盖旧数据，避免杂色
-        val result = pool.getDirty(width, height, Bitmap.Config.ARGB_8888)
+    override suspend fun transform(input: Bitmap, size: Size): Bitmap {
+        // 竖屏先按视图比例居中裁剪 (只裁不缩, 对齐原版 blur 与渐变之间的 CenterCrop):
+        // 渐变须画在与视图同比例的位图上, 否则首尾会被 ImageView 的 CENTER_CROP 裁掉,
+        // 底部收不到全透明
+        val src = if (land) input else input.cropToAspect(size)
+        val width = src.width
+        val height = src.height
+
+        // Coil3 无 BitmapPool，直接 createBitmap（配合 SRC 模式覆盖旧数据）
+        val result = createBitmap(width, height)
 
         val canvas = Canvas(result)
         val paint = threadPaint.get()!!
         val matrix = threadMatrix.get()!!
-        val gradient = threadGradient.get()!!
-
-        // 1. 将原图设为 Shader
-        val bitmapShader = BitmapShader(toTransform, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
-
-        // 2. 使用模板渐变并通过 Matrix 缩放，避免每次 new LinearGradient
-        matrix.setScale(1f, height.toFloat())
-        gradient.setLocalMatrix(matrix)
-
-        // 3. 组合 Shader：使用 DST_IN 模式，使 gradient 的 alpha 通道应用到 bitmapShader 上
-        // DST_IN 效果为：结果颜色 = Destination 颜色 * Source Alpha
-        paint.shader = ComposeShader(bitmapShader, gradient, PorterDuff.Mode.DST_IN)
+        val bitmapShader = BitmapShader(src, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        // 竖屏顶部条: 顶部清晰 → 底部淡出渐变蒙版 (原版语义); 横屏整列均匀模糊不加渐变
+        val gradient = if (!land) {
+            LinearGradient(
+                0f, 0f, 0f, 1f,
+                GRADIENT_COLORS,
+                GRADIENT_STOPS,
+                Shader.TileMode.CLAMP
+            )
+        } else {
+            null
+        }
+        if (gradient != null) {
+            matrix.setScale(1f, height.toFloat())
+            gradient.setLocalMatrix(matrix)
+            // 组合 Shader: 使用 DST_IN 模式, 使 gradient 的 alpha 通道应用到 bitmapShader 上
+            // DST_IN 效果为: 结果颜色 = Destination 颜色 * Source Alpha
+            paint.shader = ComposeShader(bitmapShader, gradient, PorterDuff.Mode.DST_IN)
+        } else {
+            paint.shader = bitmapShader
+        }
 
         // 4. 应用暗化滤镜：在 Shader 输出后进行像素着色处理
         paint.colorFilter = DARK_COLOR_FILTER
@@ -104,16 +105,24 @@ class BookInfoBgTransformation : BitmapTransformation() {
         paint.colorFilter = null
         paint.xfermode = null
         matrix.reset()
-        gradient.setLocalMatrix(null)
+        gradient?.setLocalMatrix(null)
 
         return result
     }
+}
 
-    override fun updateDiskCacheKey(messageDigest: MessageDigest) {
-        messageDigest.update(idBytes)
+/** 按目标宽高比居中裁剪 (只裁不缩; 目标尺寸未定或比例已一致时原样返回)。 */
+private fun Bitmap.cropToAspect(size: Size): Bitmap {
+    val targetWidth = size.width.pxOrElse { 0 }
+    val targetHeight = size.height.pxOrElse { 0 }
+    if (targetWidth <= 0 || targetHeight <= 0) return this
+    var cropWidth = width
+    var cropHeight = height
+    if (width.toLong() * targetHeight > height.toLong() * targetWidth) {
+        cropWidth = (height.toLong() * targetWidth / targetHeight).toInt().coerceIn(1, width)
+    } else {
+        cropHeight = (width.toLong() * targetHeight / targetWidth).toInt().coerceIn(1, height)
     }
-
-    override fun equals(other: Any?): Boolean = other is BookInfoBgTransformation
-
-    override fun hashCode(): Int = ID.hashCode()
+    if (cropWidth == width && cropHeight == height) return this
+    return Bitmap.createBitmap(this, (width - cropWidth) / 2, (height - cropHeight) / 2, cropWidth, cropHeight)
 }

@@ -3,15 +3,17 @@ package io.legado.app.utils
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
-import android.webkit.WebSettings
-import io.legado.app.BuildConfig
+import androidx.webkit.WebViewCompat
+import io.legado.app.App
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
+import io.legado.app.constant.appInfo
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.coroutine.printStackTraceOnDebug
 import io.legado.app.help.globalExecutor
-import splitties.init.appCtx
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 import java.util.logging.FileHandler
 import java.util.logging.Level
 import java.util.logging.LogRecord
@@ -20,7 +22,7 @@ import kotlin.time.Duration.Companion.days
 
 object LogUtils {
     const val TIME_PATTERN = "yy-MM-dd HH:mm:ss.SSS"
-    val logTimeFormat by lazy { SimpleDateFormat(TIME_PATTERN) }
+    val logTimeFormat by lazy { SimpleDateFormat(TIME_PATTERN, Locale.US) }
 
     fun init(context: Context) {
         fileHandler = createFileHandler(context)?.also {
@@ -113,13 +115,15 @@ object LogUtils {
                     append("MODEL=").append(Build.MODEL).append("\n")
                     append("SDK_INT=").append(Build.VERSION.SDK_INT).append("\n")
                     append("RELEASE=").append(Build.VERSION.RELEASE).append("\n")
-                    val userAgent = try {
-                        WebSettings.getDefaultUserAgent(appCtx)
+                    val webViewVersion = try {
+                        WebViewCompat.getCurrentWebViewPackage(App.instance)?.let {
+                            "${it.packageName} ${it.versionName}"
+                        } ?: "null"
                     } catch (e: Throwable) {
                         e.toString()
                     }
-                    append("WebViewUserAgent=").append(userAgent).append("\n")
-                    append("packageName=").append(appCtx.packageName).append("\n")
+                    append("WebViewPackage=").append(webViewVersion).append("\n")
+                    append("packageName=").append(App.instance.packageName).append("\n")
                     append("heapSize=").append(Runtime.getRuntime().maxMemory()).append("\n")
                     //获取app版本信息
                     AppConst.appInfo.let {
@@ -133,8 +137,12 @@ object LogUtils {
 
 }
 
+/**
+ * 转发到 shared 的 expect/actual 实现 (io.legado.app.help.coroutine.printOnDebug),
+ * 消除 BuildConfig.DEBUG 检查的重复逻辑。app 端调用方 import 零改动。
+ *
+ * P0-0b: shared printStackTraceOnDebug 改 public 后, 本函数仅作同包名便利转发层。
+ */
 fun Throwable.printOnDebug() {
-    if (BuildConfig.DEBUG) {
-        printStackTrace()
-    }
+    this.printStackTraceOnDebug()
 }

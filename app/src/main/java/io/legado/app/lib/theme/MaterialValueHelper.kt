@@ -2,21 +2,20 @@
 
 package io.legado.app.lib.theme
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
 import androidx.annotation.ColorInt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import io.legado.app.R
-import io.legado.app.help.config.AppConfig
 import io.legado.app.utils.ColorUtils
-import io.legado.app.utils.dpToPx
 
 /**
  * 主题相关的 Context / Fragment 扩展属性。
  *
  * @author Karim Abou Zeid (kabouzeid)
+ *
+ * 2026-08-04: 统一尺寸/颜色常量基础设施, 用户确认保留(即使当前零引用)。
  */
 
 // ===== 文字颜色函数（按背景明暗返回对应色） =====
@@ -89,24 +88,10 @@ val Context.secondaryTextColor: Int
 val Context.isDarkTheme: Boolean
     get() = ColorUtils.isColorLight(ThemeStore.backgroundColor)
 
-val Context.elevation: Float
-    @SuppressLint("PrivateResource")
-    get() {
-        return if (AppConfig.elevation < 0) {
-            ThemeUtils.resolveFloat(
-                this,
-                android.R.attr.elevation,
-                resources.getDimension(com.google.android.material.R.dimen.design_appbar_elevation)
-            )
-        } else {
-            AppConfig.elevation.toFloat().dpToPx()
-        }
-    }
-
 val Context.filletBackground: GradientDrawable
     get() {
         val background = GradientDrawable()
-        background.cornerRadius = 5f.dpToPx()
+        background.cornerRadius = radius.defaultF
         background.setColor(bottomBackground)
         return background
     }

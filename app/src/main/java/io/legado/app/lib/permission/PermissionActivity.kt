@@ -9,24 +9,21 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
-import io.legado.app.R
+import io.legado.app.base.ComposeDialog
 import io.legado.app.constant.AppLog
 import io.legado.app.exception.NoStackTraceException
-import io.legado.app.lib.dialogs.alert
-import io.legado.app.lib.dialogs.negativeButton
-import io.legado.app.lib.dialogs.onCancelled
-import io.legado.app.lib.dialogs.positiveButton
+import io.legado.app.help.i18n.androidAppString
+import io.legado.app.ui.compose.dialogs.alert
 import io.legado.app.utils.registerForActivityResult
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.launch
 
 class PermissionActivity : AppCompatActivity() {
 
-    private var rationaleDialog: AlertDialog? = null
+    private var rationaleDialog: ComposeDialog? = null
 
     private val settingActivityResult =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -139,8 +136,16 @@ class PermissionActivity : AppCompatActivity() {
                 }
             }
         }
+        // 对话框已关闭、Activity 仍可见时 (从系统设置页返回等), 返回键 = 取消权限请求,
+        // 语义对齐 showSettingDialog 的 onCancelled: 回调拒绝结果 + finish。
+        // (原版空回调恒消费返回键, 导致该界面返回键完全失效, 用户被困无法退出)
         onBackPressedDispatcher.addCallback(this) {
-
+            rationaleDialog?.dismiss()
+            RequestPlugins.sRequestCallback?.onRequestPermissionsResult(
+                permissions,
+                IntArray(0)
+            )
+            finish()
         }
     }
 
@@ -155,7 +160,7 @@ class PermissionActivity : AppCompatActivity() {
             settingIntent.data = Uri.fromParts("package", packageName, null)
             settingActivityResult.launch(settingIntent)
         } catch (e: Exception) {
-            toastOnUi(R.string.tip_cannot_jump_setting_page)
+            toastOnUi(androidAppString("tip_cannot_jump_setting_page"))
             RequestPlugins.sRequestCallback?.onError(e)
             finish()
         }
@@ -198,11 +203,11 @@ class PermissionActivity : AppCompatActivity() {
             return
         }
         rationaleDialog = alert(
-            getString(R.string.dialog_title),
+            androidAppString("dialog_title"),
             rationale
         ) {
-            positiveButton(R.string.dialog_setting) { onOk.invoke() }
-            negativeButton(R.string.dialog_cancel) {
+            positiveButton(androidAppString("dialog_setting")) { onOk.invoke() }
+            negativeButton(androidAppString("dialog_cancel")) {
                 RequestPlugins.sRequestCallback?.onRequestPermissionsResult(
                     permissions,
                     IntArray(0)

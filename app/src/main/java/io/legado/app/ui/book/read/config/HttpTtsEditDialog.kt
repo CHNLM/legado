@@ -1,30 +1,28 @@
 package io.legado.app.ui.book.read.config
 
 import android.os.Bundle
-import android.view.MenuItem
-import android.view.View
-import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.Toolbar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.fragment.app.viewModels
-import io.legado.app.R
-import io.legado.app.base.BaseDialogFragment
+import io.legado.app.ui.compose.platform.rememberString
+import io.legado.app.help.i18n.androidAppString
+import io.legado.app.base.BaseComposeDialogFragment
 import io.legado.app.data.entities.HttpTTS
-import io.legado.app.databinding.DialogHttpTtsEditBinding
-import io.legado.app.lib.dialogs.alert
-import io.legado.app.ui.about.AppLogDialog
-import io.legado.app.ui.widget.code.addJsPattern
-import io.legado.app.ui.widget.code.addJsonPattern
-import io.legado.app.ui.widget.code.addLegadoPattern
+import io.legado.app.ui.compose.dialogs.alert
+import io.legado.app.ui.root.AppNavigatorProviders
+import io.legado.app.ui.root.AppOverlay
+import io.legado.app.ui.widget.text.EditEntity
+import io.legado.app.ui.widget.text.EditEntity.CodePattern
+import io.legado.app.ui.widget.text.EditEntity.ViewType
 import io.legado.app.utils.GSON
-import io.legado.app.utils.applyTint
 import io.legado.app.utils.sendToClip
-import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.showHelp
+import io.legado.app.utils.toJson
 import io.legado.app.utils.toastOnUi
-import io.legado.app.utils.viewbindingdelegate.viewBinding
 
-class HttpTtsEditDialog() : BaseDialogFragment(R.layout.dialog_http_tts_edit),
-    Toolbar.OnMenuItemClickListener {
+class HttpTtsEditDialog() : BaseComposeDialogFragment() {
 
     constructor(id: Long) : this() {
         arguments = Bundle().apply {
@@ -32,98 +30,107 @@ class HttpTtsEditDialog() : BaseDialogFragment(R.layout.dialog_http_tts_edit),
         }
     }
 
-    private val binding by viewBinding(DialogHttpTtsEditBinding::bind)
     private val viewModel by viewModels<HttpTtsEditViewModel>()
+    private var editEntities by mutableStateOf<List<EditEntity>>(emptyList())
 
-    override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
-        binding.tvUrl.run {
-            addLegadoPattern()
-            addJsonPattern()
-            addJsPattern()
-        }
-        binding.tvLoginUrl.run {
-            addLegadoPattern()
-            addJsonPattern()
-            addJsPattern()
-        }
-        binding.tvLoginUi.addJsonPattern()
-        binding.tvLoginCheckJs.addJsPattern()
-        binding.tvHeaders.run {
-            addLegadoPattern()
-            addJsonPattern()
-            addJsPattern()
-        }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
         viewModel.initData(arguments) {
             initView(httpTTS = it)
         }
-        initMenu()
     }
 
-    fun initMenu() {
-        binding.toolBar.inflateMenu(R.menu.speak_engine_edit)
-        binding.toolBar.menu.applyTint(requireContext())
-        binding.toolBar.setOnMenuItemClickListener(this)
+    @Composable
+    override fun Content() {
+        HttpTtsEditDialogContent(
+            editEntities = editEntities,
+            onBack = { dismissAllowingStateLoss() },
+            onSave = {
+                viewModel.save(dataFromView()) {
+                    toastOnUi("保存成功")
+                }
+            },
+            onLogin = { login() },
+            onShowLoginHeader = { showLoginHeader() },
+            onDeleteLoginHeader = { dataFromView().removeLoginHeader() },
+            onCopySource = {
+                context?.sendToClip(GSON.toJson(dataFromView()))
+            },
+            onPasteSource = {
+                viewModel.importFromClip { initView(it) }
+            },
+            onShowLog = {
+                AppNavigatorProviders.get().showOverlay(AppOverlay.Dialog("app_log"))
+            },
+            onShowHelp = { showHelp("httpTTSHelp") },
+        )
+    }
+
+    private fun login() = dataFromView().let { httpTts ->
+        if (httpTts.hasLogin()) {
+            viewModel.save(httpTts) {
+                httpTts.showLoginDialog()
+            }
+        } else toastOnUi("没有登陆界面")
+    }
+
+    private fun showLoginHeader() = alert {
+        setTitle(androidAppString("login_header"))
+        dataFromView().getLoginHeader()?.let { loginHeader ->
+            setMessage(loginHeader)
+        }
     }
 
     fun initView(httpTTS: HttpTTS) {
-        binding.tvName.setText(httpTTS.name)
-        binding.tvUrl.setText(httpTTS.url)
-        binding.tvContentType.setText(httpTTS.contentType)
-        binding.tvConcurrentRate.setText(httpTTS.concurrentRate)
-        binding.tvLoginUrl.setText(httpTTS.loginUrl)
-        binding.tvLoginUi.setText(httpTTS.loginUi)
-        binding.tvLoginCheckJs.setText(httpTTS.loginCheckJs)
-        binding.tvHeaders.setText(httpTTS.header)
-    }
-
-    override fun onMenuItemClick(item: MenuItem?): Boolean {
-        when (item?.itemId) {
-            R.id.menu_save -> viewModel.save(dataFromView()) {
-                toastOnUi("保存成功")
-            }
-
-            R.id.menu_login -> dataFromView().let { httpTts ->
-                if (httpTts.hasLogin()) {
-                    viewModel.save(httpTts) {
-                        httpTts.showLoginDialog(activity as AppCompatActivity)
-                    }
-                } else toastOnUi("没有登陆界面")
-            }
-
-            R.id.menu_show_login_header -> alert {
-                setTitle(R.string.login_header)
-                dataFromView().getLoginHeader()?.let { loginHeader ->
-                    setMessage(loginHeader)
-                }
-            }
-
-            R.id.menu_del_login_header -> dataFromView().removeLoginHeader()
-            R.id.menu_copy_source -> dataFromView().let {
-                context?.sendToClip(GSON.toJson(it))
-            }
-
-            R.id.menu_paste_source -> viewModel.importFromClip {
-                initView(it)
-            }
-
-            R.id.menu_log -> showDialogFragment<AppLogDialog>()
-            R.id.menu_help -> showHelp("httpTTSHelp")
-        }
-        return true
+        editEntities = listOf(
+            // name: 简单文本字段
+            EditEntity("name", httpTTS.name, androidAppString("name")),
+            // url: 代码字段 + 全部着色 (legado + json + js)
+            EditEntity("url", httpTTS.url, "url", ViewType.code, codePatterns = CodePattern.all),
+            // contentType: 短文本字段（MIME 类型），无需语法高亮
+            EditEntity("contentType", httpTTS.contentType, "Content-Type"),
+            // concurrentRate: 短文本字段（限速值），无需语法高亮
+            EditEntity("concurrentRate", httpTTS.concurrentRate, androidAppString("concurrent_rate")),
+            // loginUrl: 代码字段 + 全部着色
+            EditEntity(
+                "loginUrl", httpTTS.loginUrl, androidAppString("login_url"),
+                ViewType.code, codePatterns = CodePattern.all
+            ),
+            // loginUi: 代码字段 + json 着色
+            EditEntity(
+                "loginUi", httpTTS.loginUi, androidAppString("login_ui"),
+                ViewType.code, codePatterns = CodePattern.json
+            ),
+            // loginCheckJs: 代码字段 + js 着色
+            EditEntity(
+                "loginCheckJs", httpTTS.loginCheckJs, androidAppString("login_check_js"),
+                ViewType.code, codePatterns = CodePattern.js
+            ),
+            // header: 代码字段 + 全部着色
+            EditEntity(
+                "header", httpTTS.header, androidAppString("source_http_header"),
+                ViewType.code, codePatterns = CodePattern.all
+            ),
+        )
     }
 
     private fun dataFromView(): HttpTTS {
-        return HttpTTS(
-            id = viewModel.id ?: System.currentTimeMillis(),
-            name = binding.tvName.text.toString(),
-            url = binding.tvUrl.text.toString(),
-            contentType = binding.tvContentType.text?.toString(),
-            concurrentRate = binding.tvConcurrentRate.text?.toString(),
-            loginUrl = binding.tvLoginUrl.text?.toString(),
-            loginUi = binding.tvLoginUi.text?.toString(),
-            loginCheckJs = binding.tvLoginCheckJs.text?.toString(),
-            header = binding.tvHeaders.text?.toString()
+        val httpTTS = HttpTTS(
+            id = viewModel.id ?: System.currentTimeMillis()
         )
+        editEntities.forEach {
+            when (it.key) {
+                "name" -> httpTTS.name = it.text.orEmpty()
+                "url" -> httpTTS.url = it.text.orEmpty()
+                "contentType" -> httpTTS.contentType = it.text
+                "concurrentRate" -> httpTTS.concurrentRate = it.text
+                "loginUrl" -> httpTTS.loginUrl = it.text
+                "loginUi" -> httpTTS.loginUi = it.text
+                "loginCheckJs" -> httpTTS.loginCheckJs = it.text
+                "header" -> httpTTS.header = it.text
+            }
+        }
+        return httpTTS
     }
 
 }

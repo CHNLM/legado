@@ -1,29 +1,30 @@
 package io.legado.app.help.source
 
-import io.legado.app.constant.AppLog
+import io.legado.app.constant.EventBus
 import io.legado.app.data.entities.BaseSource
+import io.legado.app.data.entities.SourceUiRequest
 import io.legado.app.exception.NoStackTraceException
-import io.legado.app.help.CacheManager
-import io.legado.app.help.IntentData
-import io.legado.app.ui.association.VerificationCodeDialog
-import io.legado.app.ui.browser.WebViewActivity
+import io.legado.app.ui.root.AppNavigatorProviders
+import io.legado.app.ui.root.AppOverlay
+import io.legado.app.ui.root.AppRoute
+import io.legado.app.utils.FlowBus
 import io.legado.app.utils.isMainThread
-import io.legado.app.utils.startActivity
-import splitties.init.appCtx
-import java.util.concurrent.locks.LockSupport
-import kotlin.time.Duration.Companion.minutes
 
 /**
- * 源验证
+ * 源验证 (app 端薄壳)。
+ *
+ * 核心流程 (缓存 key 生成 / setResult / getResult / clearResult / 内存轮询等待 /
+ * 注册并唤醒等待线程) 下沉到 [SourceVerificationHelpShared] (shared commonMain),
+ * 供 desktop/iOS/鸿蒙 复用。
+ *
+ * UI 部分 (验证码事件 / 推送 AppRoute.WebView) 经
+ * [VerificationUiProvider] 注入, 本文件 [VerificationUiProviderImpl] 为 app 端实现,
+ * 在 App.onCreate 经 [registerAndroidVerificationUiProvider] 注册。
+ *
+ * 调用方 import 不变 (包名 `io.legado.app.help.source.SourceVerificationHelp` 保持)。
+ * 行为与下沉前完全一致, 仅位置迁移 + 依赖抽象。
  */
 object SourceVerificationHelp {
-
-    private val waitTime = 1.minutes.inWholeNanoseconds
-
-    private fun getVerificationResultKey(source: BaseSource) =
-        getVerificationResultKey(source.getKey())
-
-    private fun getVerificationResultKey(sourceKey: String) = "${sourceKey}_verificationResult"
 
     /**
      * 获取书源验证结果
@@ -45,33 +46,13 @@ object SourceVerificationHelp {
         clearResult(source.getKey())
 
         if (!useBrowser) {
-            VerificationCodeDialog.display(
-                url,
-                source.getKey(),
-                source.getTag(),
-                source.getSourceType()
-            )
-            IntentData.put(getVerificationResultKey(source), Thread.currentThread())
+            VerificationUiProviders.get().showVerificationCodeDialog(url, source)
+            SourceVerificationHelpShared.registerWaitingThread(source.getKey())
         } else {
             startBrowser(source, url, title, true, refetchAfterSuccess)
         }
 
-        var waitUserInput = false
-        while (getResult(source.getKey()) == null) {
-            if (!waitUserInput) {
-                AppLog.putDebug("等待返回验证结果...")
-                waitUserInput = true
-            }
-            LockSupport.parkNanos(this, waitTime)
-        }
-
-        val result = getResult(source.getKey())!!
-        clearResult(source.getKey())
-        result.ifBlank {
-            throw NoStackTraceException("验证结果为空")
-        }
-
-        return result
+        return SourceVerificationHelpShared.waitVerificationResult(source.getKey())
     }
 
     /**
@@ -83,38 +64,91 @@ object SourceVerificationHelp {
         url: String,
         title: String,
         saveResult: Boolean? = false,
-        refetchAfterSuccess: Boolean? = true
+        refetchAfterSuccess: Boolean? = true,
+        asBottomSheet: Boolean = false,
     ) {
         source ?: throw NoStackTraceException("startBrowser parameter source cannot be null")
         require(url.length < 64 * 1024) { "startBrowser parameter url too long" }
-        appCtx.startActivity<WebViewActivity> {
-            putExtra("title", title)
-            putExtra("url", url)
-            putExtra("sourceOrigin", source.getKey())
-            putExtra("sourceName", source.getTag())
-            putExtra("sourceType", source.getSourceType())
-            putExtra("sourceVerificationEnable", saveResult)
-            putExtra("refetchAfterSuccess", refetchAfterSuccess)
-            IntentData.put(getVerificationResultKey(source), Thread.currentThread())
-        }
+        VerificationUiProviders.get()
+            .startBrowser(source, url, title, saveResult, refetchAfterSuccess, asBottomSheet)
+        SourceVerificationHelpShared.registerWaitingThread(source.getKey())
     }
 
 
     fun checkResult(sourceKey: String) {
-        getResult(sourceKey) ?: setResult(sourceKey, "")
-        val thread = IntentData.get<Thread>(getVerificationResultKey(sourceKey))
-        LockSupport.unpark(thread)
+        SourceVerificationHelpShared.getResult(sourceKey) ?: SourceVerificationHelpShared.setResult(sourceKey, "")
+        SourceVerificationHelpShared.notifyResultArrived(sourceKey)
     }
 
     fun setResult(sourceKey: String, result: String?) {
-        CacheManager.putMemory(getVerificationResultKey(sourceKey), result ?: "")
+        SourceVerificationHelpShared.setResult(sourceKey, result)
     }
 
     fun getResult(sourceKey: String): String? {
-        return CacheManager.getFromMemory(getVerificationResultKey(sourceKey)) as? String
+        return SourceVerificationHelpShared.getResult(sourceKey)
     }
 
     fun clearResult(sourceKey: String) {
-        CacheManager.delete(getVerificationResultKey(sourceKey))
+        SourceVerificationHelpShared.clearResult(sourceKey)
     }
+}
+
+/**
+ * [VerificationUiProvider] 的 app 端实现。
+ *
+ * 验证码发 [SourceUiRequest.VerificationCode] 事件 (共享对话框宿主消费),
+ * 网页验证经 [AppNavigatorProviders] 推送 [AppRoute.WebView],
+ * 在 App.onCreate 经 [registerAndroidVerificationUiProvider] 注册
+ * 到 [VerificationUiProviders]。
+ */
+object VerificationUiProviderImpl : VerificationUiProvider {
+
+    override fun showVerificationCodeDialog(url: String, source: BaseSource) {
+        // 与 desktop/iOS/鸿蒙同链: 发事件, 由 shared SourceUiEventBridgeHost 弹共享
+        // VerificationCodeDialog 采集并回填 (原 app 端平行实现的对话框已删)
+        FlowBus.with(EventBus.SOURCE_UI_REQUEST)
+            .tryEmit(SourceUiRequest.VerificationCode(source, url))
+    }
+
+    override fun startBrowser(
+        source: BaseSource,
+        url: String,
+        title: String,
+        saveResult: Boolean?,
+        refetchAfterSuccess: Boolean?,
+        asBottomSheet: Boolean,
+    ) {
+        // getOrNull: 验证码请求由书源 JS 发起, 校验源/缓存下载等后台链上没有 UI 宿主
+        val navigator = AppNavigatorProviders.getOrNull() ?: return
+        // 半屏与全屏共用同一个参数包: 两形态跑的是同一段实现 (WebViewScreen), 参数一份
+        // 才谈得上行为一致 —— 书源 headerMap 预取、跳转拦截、验证回传全部同源。
+        // (对照原 WebViewActivity 的 intent extras)
+        val spec = AppRoute.WebView(
+            url = url,
+            title = title,
+            sourceKey = source.getKey(),
+            sourceName = source.getTag(),
+            sourceType = source.getSourceType(),
+            saveResult = saveResult ?: false,
+            refetchAfterSuccess = refetchAfterSuccess ?: true,
+        )
+        if (asBottomSheet) {
+            // BottomSheet 半屏方式打开 (对照 JsActivity BottomSheetDialog peekHeight=60%)
+            navigator.showOverlay(
+                AppOverlay.Sheet(key = "web_view", payload = url, webView = spec)
+            )
+        } else {
+            navigator.push(spec)
+        }
+    }
+}
+
+/**
+ * 注册 app 端 [VerificationUiProviderImpl] 到 [VerificationUiProviders]。
+ *
+ * 在 App.onCreate 早期 (registerAndroidWebBookProviders 中) 调用一次,
+ * 任何 SourceVerificationHelp 调用之前。
+ */
+fun registerAndroidVerificationUiProvider() {
+    VerificationUiProviders.register(VerificationUiProviderImpl)
 }

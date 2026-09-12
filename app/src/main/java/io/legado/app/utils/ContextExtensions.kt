@@ -20,7 +20,6 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.drawable.Drawable
-import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
@@ -31,26 +30,12 @@ import androidx.annotation.DrawableRes
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.content.edit
-import androidx.preference.PreferenceManager
-import io.legado.app.R
+import io.legado.app.clipboardManager
 import io.legado.app.constant.AppConst
-import io.legado.app.data.entities.BaseBook
-import io.legado.app.data.entities.Book
-import io.legado.app.data.entities.SearchBook
-import io.legado.app.help.IntentData
+import io.legado.app.constant.authority
 import io.legado.app.help.IntentHelp
-import io.legado.app.help.book.isAudio
-import io.legado.app.help.book.isImage
-import io.legado.app.help.book.isRss
-import io.legado.app.help.book.isVideo
-import io.legado.app.ui.book.audio.AudioPlayActivity
-import io.legado.app.ui.book.manga.ReadMangaActivity
-import io.legado.app.ui.book.read.ReadBookActivity
-import io.legado.app.ui.book.rss.ReadRssActivity
-import io.legado.app.ui.book.video.VideoPlayActivity
-import splitties.systemservices.clipboardManager
-import splitties.systemservices.connectivityManager
-import splitties.systemservices.uiModeManager
+import io.legado.app.help.i18n.androidAppString
+import io.legado.app.uiModeManager
 import java.io.File
 import kotlin.system.exitProcess
 
@@ -61,28 +46,12 @@ inline fun <reified A : Activity> Context.startActivity(configIntent: Intent.() 
     startActivity(intent)
 }
 
-fun Context.startActivityForBook(
-    book: BaseBook,
-    configIntent: Intent.() -> Unit = {},
-) {
-    IntentData.book = book
-    val book = if (book is SearchBook)book.toBook() else book as Book
-    val cls = when {
-        book.isAudio -> AudioPlayActivity::class.java
-        book.isVideo -> VideoPlayActivity::class.java
-        book.isImage -> ReadMangaActivity::class.java
-        book.isRss -> ReadRssActivity::class.java
-        else -> ReadBookActivity::class.java
-    }
-    val intent = Intent(this, cls)
-    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    intent.apply(configIntent)
-    startActivity(intent)
-}
-
-
 inline fun <reified T : Service> Context.startService(configIntent: Intent.() -> Unit = {}) {
     startService(Intent(this, T::class.java).apply(configIntent))
+}
+
+inline fun <reified T : Service> Context.startForegroundService(configIntent: Intent.() -> Unit = {}) {
+    ContextCompat.startForegroundService(this, Intent(this, T::class.java).apply(configIntent))
 }
 
 inline fun <reified T : Service> Context.stopService() {
@@ -104,20 +73,6 @@ inline fun <reified T : Service> Context.servicePendingIntent(
     }
     return getService(this, requestCode, intent, flags)
 }
-
-fun Context.activityPendingIntent(
-    intent: Intent,
-    action: String,
-): PendingIntent? {
-    intent.action = action
-    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        FLAG_UPDATE_CURRENT or FLAG_MUTABLE
-    } else {
-        FLAG_UPDATE_CURRENT
-    }
-    return getActivity(this, 0, intent, flags)
-}
-
 
 inline fun <reified T : Activity> Context.activityPendingIntent(
     action: String,
@@ -158,7 +113,8 @@ fun Context.startForegroundServiceCompat(intent: Intent) {
 }
 
 val Context.defaultSharedPreferences: SharedPreferences
-    get() = PreferenceManager.getDefaultSharedPreferences(this)
+    // 等价 androidx.preference PreferenceManager.getDefaultSharedPreferences（该依赖已随 lib/prefs 移除）
+    get() = getSharedPreferences(packageName + "_preferences", Context.MODE_PRIVATE)
 
 fun Context.getPrefBoolean(key: String, defValue: Boolean = false) =
     defaultSharedPreferences.getBoolean(key, defValue)
@@ -234,6 +190,7 @@ val Context.sysScreenOffTime: Int
     }
 
 val Context.statusBarHeight: Int
+    @android.annotation.SuppressLint("InternalInsetResource", "DiscouragedApi")
     get() {
         if (Build.BOARD == "windows") {
             return 0
@@ -243,12 +200,13 @@ val Context.statusBarHeight: Int
     }
 
 val Context.navigationBarHeight: Int
+    @android.annotation.SuppressLint("InternalInsetResource", "DiscouragedApi")
     get() {
         val resourceId = resources.getIdentifier("navigation_bar_height", "dimen", "android")
         return resources.getDimensionPixelSize(resourceId)
     }
 
-fun Context.share(text: String, title: String = getString(R.string.share)) {
+fun Context.share(text: String, title: String = androidAppString("share")) {
     kotlin.runCatching {
         val intent = Intent(Intent.ACTION_SEND)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -259,12 +217,12 @@ fun Context.share(text: String, title: String = getString(R.string.share)) {
     }
 }
 
-fun Context.share(file: File, type: String = "text/*", title: String = getString(R.string.share)) {
+fun Context.share(file: File, type: String = "text/*", title: String = androidAppString("share")) {
     val fileUri = FileProvider.getUriForFile(this, AppConst.authority, file)
     share(fileUri, type, title)
 }
 
-fun Context.share(uri: Uri, type: String = "text/*", title: String = getString(R.string.share)) {
+fun Context.share(uri: Uri, type: String = "text/*", title: String = androidAppString("share")) {
     kotlin.runCatching {
         val intent = Intent(Intent.ACTION_SEND)
         intent.type = type
@@ -280,7 +238,7 @@ fun Context.share(uri: Uri, type: String = "text/*", title: String = getString(R
 fun Context.sendToClip(text: String) {
     val clipData = ClipData.newPlainText(null, text)
     clipboardManager.setPrimaryClip(clipData)
-    longToastOnUi(R.string.copy_complete)
+    longToastOnUi(androidAppString("copy_complete"))
 }
 
 fun getClipText(): String? {
@@ -345,12 +303,6 @@ fun Context.openFileUri(uri: Uri, type: String? = null) {
         e.printOnDebug()
     }
 }
-
-val Context.isWifiConnect: Boolean
-    get() {
-        val info = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI)
-        return info?.isConnected == true
-    }
 
 val Context.isPad: Boolean
     get() {

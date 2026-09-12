@@ -29,7 +29,7 @@ type BaseSource = {
    */
   jsLib?: string
 }
-type BookSoure = BaseSource & {
+type BookSource = BaseSource & {
   // 地址，包括 http/https
   bookSourceUrl: string
   // 名称
@@ -60,6 +60,12 @@ type BookSoure = BaseSource & {
   respondTime: number
   // 智能排序的权重
   weight: number
+  // 启用段评
+  enabledReview?: boolean
+  // 高危api
+  enableDangerousApi?: boolean
+  // 发现样式
+  exploreStyle?: number
   // 发现url
   exploreUrl?: string
   // 发现筛选规则
@@ -79,87 +85,128 @@ type BookSoure = BaseSource & {
   // 段评规则
   ruleReview?: ReviewRule
 }
-type RuleSearch = {
-  checkKeyWord?: string
-  [prop: string]: string
-}
-/* type ExploreRule = {
-    [prop:string]: string
-}
-type BookInfoRule = {
-    [prop:string]: string
-}
-type TocRule = {
-    [prop:string]: string
-}
-type ContentRule = {
-    [prop:string]: string
-}
-type ReviewRule = {
-    [prop:string]: string
-} */
-type RssSource = BaseSource & {
-  sourceUrl: string
-  // 名称
-  sourceName: string
-  // 图标
-  sourceIcon: string
-  // 分组
-  sourceGroup?: string
-  // 注释
-  sourceComment?: string
-  // 是否启用
-  enabled: boolean
-  // 自定义变量说明
-  variableComment?: string
-  /**登录检测js**/
-  loginCheckJs?: string
-  /**封面解密js**/
-  coverDecodeJs?: string
-  /**分类Url**/
-  sortUrl?: string
-  /**是否单url源**/
-  singleUrl: boolean
-  /*列表规则*/
-  /**列表样式,0,1,2**/
-  articleStyle: number
-  /**列表规则**/
-  ruleArticles?: string
-  /**下一页规则**/
-  ruleNextPage?: string
-  /**标题规则**/
-  ruleTitle?: string
-  /**发布日期规则**/
-  rulePubDate?: string
-  /*webView规则*/
-  /**描述规则**/
-  ruleDescription?: string
-  /**图片规则**/
-  ruleImage?: string
-  /**链接规则**/
-  ruleLink?: string
-  /**正文规则**/
-  ruleContent?: string
-  /**正文url白名单**/
-  contentWhitelist?: string
-  /**正文url黑名单**/
-  contentBlacklist?: string
-  /**
-   * 跳转url拦截,
-   * js, 返回true拦截,js变量url,可以通过js打开url,比如调用阅读搜索,添加书架等,简化规则写法,不用webView js注入
-   * **/
-  shouldOverrideUrlLoading?: string
-  /**webView样式**/
-  style?: string
-  enableJs: boolean
-  loadWithBaseUrl: boolean
-  /**注入js**/
-  injectJs?: string
-  /*其它规则*/
-  /**最后更新时间，用于排序**/
-  lastUpdateTime: number
-  customOrder: number
-}
-type Source = BookSoure
 
-export { Source, BookSoure }
+type RawBookSource = Omit<
+  BookSource,
+  'ruleExplore' | 'ruleSearch' | 'ruleBookInfo' | 'ruleToc' | 'ruleContent' | 'ruleReview'
+> & {
+  ruleExplore?: ExploreRule | string
+  ruleSearch?: SearchRule | string
+  ruleBookInfo?: BookInfoRule | string
+  ruleToc?: TocRule | string
+  ruleContent?: ContentRule | string
+  ruleReview?: ReviewRule | string
+}
+
+type SearchRule = {
+  checkKeyWord?: string
+  hasMoreRule?: string
+  bookList?: string
+  name?: string
+  author?: string
+  intro?: string
+  kind?: string
+  lastChapter?: string
+  updateTime?: string
+  bookUrl?: string
+  coverUrl?: string
+  wordCount?: string
+}
+
+type ExploreRule = {
+  hasMoreRule?: string
+  bookList?: string
+  name?: string
+  author?: string
+  intro?: string
+  kind?: string
+  lastChapter?: string
+  updateTime?: string
+  bookUrl?: string
+  coverUrl?: string
+  wordCount?: string
+}
+
+type BookInfoRule = {
+  init?: string
+  name?: string
+  author?: string
+  intro?: string
+  kind?: string
+  lastChapter?: string
+  updateTime?: string
+  coverUrl?: string
+  tocUrl?: string
+  wordCount?: string
+  canReName?: string
+  downloadUrls?: string
+}
+
+type TocRule = {
+  preUpdateJs?: string
+  chapterList?: string
+  chapterName?: string
+  chapterUrl?: string
+  isVolume?: string
+  isVip?: string
+  isPay?: string
+  updateTime?: string
+  nextTocUrl?: string
+}
+
+type ContentRule = {
+  content?: string
+  title?: string
+  nextContentUrl?: string
+  webJs?: string
+  sourceRegex?: string
+  replaceRegex?: string
+  imageStyle?: string
+  imageDecode?: string
+  payAction?: string
+  subContent?: string
+  musicCover?: string
+  shouldOverrideUrlLoading?: string
+}
+
+type ReviewRule = {
+  reviewUrl?: string
+  reviewList?: string
+  reviewCountRule?: string
+  reviewIdRule?: string
+  avatarRule?: string
+  nameRule?: string
+  contentRule?: string
+  postTimeRule?: string
+  extraRule?: string
+  imagesRule?: string
+  voteUpCountRule?: string
+  voteUpSelectedRule?: string
+  voteDownSelectedRule?: string
+  replyCountRule?: string
+  totalCountRule?: string
+  replyListUrl?: string
+  hasMoreRule?: string
+  voteUpRule?: string
+  voteDownRule?: string
+  replyRule?: string
+  deleteRule?: string
+}
+
+type BookSoure = BookSource
+type Source = BookSource
+type RawSource = RawBookSource
+
+export {
+  Source,
+  BookSource,
+  BookSoure,
+  RawSource,
+  RawBookSource,
+  SearchRule,
+  ExploreRule,
+  BookInfoRule,
+  TocRule,
+  ContentRule,
+  ReviewRule,
+}

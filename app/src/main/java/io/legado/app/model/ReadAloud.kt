@@ -2,6 +2,7 @@ package io.legado.app.model
 
 import android.content.Context
 import android.content.Intent
+import io.legado.app.App
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.IntentAction
 import io.legado.app.data.appDb
@@ -14,32 +15,38 @@ import io.legado.app.utils.LogUtils
 import io.legado.app.utils.StringUtils
 import io.legado.app.utils.startForegroundServiceCompat
 import io.legado.app.utils.toastOnUi
-import splitties.init.appCtx
+import kotlinx.coroutines.runBlocking
 
 object ReadAloud {
-    private var aloudClass: Class<*> = getReadAloudClass()
-    val ttsEngine get() = ReadBook.book?.config?.ttsEngine ?: AppConfig.ttsEngine
+    // 延迟到首次真正需要时再查 DAO, 避免类加载期 runBlocking 阻塞主线程
+    // (原版是同步 DAO 调用, 下沉后 DAO 仅剩 suspend, Room KMP 禁止 commonMain 声明非 suspend 查询)
+    private var aloudClassOrNull: Class<*>? = null
+    private val aloudClass: Class<*>
+        get() = aloudClassOrNull ?: getReadAloudClass().also { aloudClassOrNull = it }
+    // 书内 TTS 引擎设置取活动阅读实例 (app 端 ReadBook 单例与 Compose 阅读器非同一实例)
+    val ttsEngine
+        get() = ActiveReadBookRegistry.current?.bookValue?.config?.ttsEngine ?: AppConfig.ttsEngine
     var httpTTS: HttpTTS? = null
 
     private fun getReadAloudClass(): Class<*> {
         val ttsEngine = ttsEngine
         if (ttsEngine.isNullOrBlank()) return TTSReadAloudService::class.java
         if (StringUtils.isNumeric(ttsEngine)) {
-            httpTTS = appDb.httpTTSDao.get(ttsEngine.toLong())
+            httpTTS = runBlocking { appDb.httpTTSDao.get(ttsEngine.toLong()) }
             if (httpTTS != null) return HttpReadAloudService::class.java
         }
         return TTSReadAloudService::class.java
     }
 
     fun upReadAloudClass() {
-        stop(appCtx)
-        aloudClass = getReadAloudClass()
+        stop(App.instance)
+        aloudClassOrNull = getReadAloudClass()
     }
 
     fun play(
         context: Context,
         play: Boolean = true,
-        pageIndex: Int = ReadBook.durPageIndex,
+        pageIndex: Int = ActiveReadBookRegistry.current?.durPageIndexValue ?: 0,
         startPos: Int = 0
     ) {
         val intent = Intent(context, aloudClass).apply {

@@ -5,18 +5,17 @@ import android.content.Context
 import android.content.Intent
 import android.view.KeyEvent
 import io.legado.app.constant.EventBus
-import io.legado.app.data.appDb
 import io.legado.app.help.LifecycleHelp
 import io.legado.app.help.config.AppConfig
+import io.legado.app.model.ActiveReadBookRegistry
 import io.legado.app.model.AudioPlay
 import io.legado.app.model.ReadAloud
-import io.legado.app.model.ReadBook
 import io.legado.app.service.AudioPlayService
 import io.legado.app.service.BaseReadAloudService
-import io.legado.app.ui.book.audio.AudioPlayActivity
-import io.legado.app.ui.book.read.ReadBookActivity
+import io.legado.app.ui.book.read.ReadBookEvents
+import io.legado.app.ui.root.AppNavigatorProviders
+import io.legado.app.ui.root.AppRoute
 import io.legado.app.utils.LogUtils
-import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.postEvent
 
 
@@ -51,7 +50,7 @@ class MediaButtonReceiver : BroadcastReceiver() {
                             when {
                                 AudioPlayService.isRun -> AudioPlay.prev()
                                 BaseReadAloudService.isRun -> {
-                                    if (context.getPrefBoolean("mediaButtonPerNext", false)) {
+                                    if (AppConfig.mediaButtonPerNext) {
                                         ReadAloud.prevChapter(context)
                                     } else {
                                         ReadAloud.prevParagraph(context)
@@ -65,7 +64,7 @@ class MediaButtonReceiver : BroadcastReceiver() {
                             when {
                                 AudioPlayService.isRun -> AudioPlay.next()
                                 BaseReadAloudService.isRun -> {
-                                    if (context.getPrefBoolean("mediaButtonPerNext", false)) {
+                                    if (AppConfig.mediaButtonPerNext) {
                                         ReadAloud.nextChapter(context)
                                     } else {
                                         ReadAloud.nextParagraph(context)
@@ -113,25 +112,26 @@ class MediaButtonReceiver : BroadcastReceiver() {
                     // break
                 }
 
-                LifecycleHelp.isExistActivity(ReadBookActivity::class.java) ->
+                // AudioPlay 已下沉为共享路由, 栈顶为该路由时由页面响应媒体键事件
+                // getOrNull: 广播接收器在无界面 (仅前台服务) 时也会收到媒体键
+                AppNavigatorProviders.getOrNull()?.currentRoute is AppRoute.AudioPlay ->
                     postEvent(EventBus.MEDIA_BUTTON, true)
 
-                LifecycleHelp.isExistActivity(AudioPlayActivity::class.java) ->
-                    postEvent(EventBus.MEDIA_BUTTON, true)
+                // Reader 阅读页在栈顶时由页面响应媒体键事件 (对照原版 ReadBookActivity 分支
+                // postEvent(EventBus.MEDIA_BUTTON, true) 语义, 桥接到 shared 阅读层处理)
+                AppNavigatorProviders.getOrNull()?.currentRoute is AppRoute.Reader ->
+                    ReadBookEvents.postMediaButton(true)
 
                 else -> if (AppConfig.mediaButtonOnExit || LifecycleHelp.activitySize() > 0 || !isMediaKey) {
                     ReadAloud.upReadAloudClass()
-                    if (ReadBook.book != null) {
-                        ReadBook.readAloud()
-                    } else {
-                        appDb.bookDao.lastReadBook?.let {
-                            ReadBook.initData(it)
-                            ReadBook.clearTextChapter()
-                            ReadBook.loadContent(false) {
-                                ReadBook.readAloud()
-                            }
-                        }
+                    // 阅读页已挂接 (前台或后台驻留) 时按活动实例开播
+                    val readBook = ActiveReadBookRegistry.current
+                    if (readBook?.bookValue != null) {
+                        readBook.readAloud()
                     }
+                    // 无活动阅读页时的"直接朗读上次读的书"暂缺: 原实现靠 app 端 ReadBook 单例
+                    // 自建 TextChapter (0×0 视口, 产物无效), 该排版通路已删; 无界面朗读需要
+                    // 独立的无头朗读宿主, 设计待定
                 }
             }
         }

@@ -1,34 +1,60 @@
 package io.legado.app.help
 
 import io.legado.app.constant.AppConst
-import io.legado.app.data.appDb
+import io.legado.app.constant.appInfo
 import io.legado.app.data.entities.DictRule
 import io.legado.app.data.entities.HttpTTS
 import io.legado.app.data.entities.KeyboardAssist
 import io.legado.app.data.entities.TxtTocRule
 import io.legado.app.help.config.LocalConfig
-import io.legado.app.help.config.ReadBookConfig
-import io.legado.app.help.config.ThemeConfig
+import io.legado.app.help.config.ReadConfigDefaults
+import io.legado.app.help.config.ReadStyleConfig
 import io.legado.app.help.coroutine.Coroutine
-import io.legado.app.utils.GSON
-import io.legado.app.utils.fromJsonArray
 import io.legado.app.utils.printOnDebug
-import splitties.init.appCtx
-import java.io.File
 
+/**
+ * composeResources 打进 assets 的 defaultData 目录前缀 (含模块限定名, 由插件按模块生成)。
+ *
+ * 单一数据源在 shared/commonMain/composeResources/files/defaultData/, 前缀不能省
+ * (同 [io.legado.app.web.utils.AndroidWebAssetSource] 读 files/web/ 的方式)。
+ */
+internal const val DEFAULT_DATA_ASSET_PREFIX =
+    "composeResources/legado.shared.generated.resources/files/defaultData/"
+
+/**
+ * 默认数据加载入口 (app 端薄壳)。
+ *
+ * # 下沉说明
+ *
+ * 核心逻辑 (httpTTS/txtTocRules/dictRules/keyboardAssists 属性 + importDefaultHttpTTS/
+ * importDefaultTocRules/importDefaultDictRules 方法) 已下沉到 shared commonMain [DefaultDataShared]。
+ * 本 object 仅保留 app 端特有部分:
+ *
+ * - `readConfigs`: 委托 shared 的 [ReadConfigDefaults] (readConfig.json 已内联下沉),
+ *   仅保留转发。
+ * - `upVersion()`: 依赖 app 端 [LocalConfig] (SharedPreferences) + [AppConst.appInfo]
+ *   (PackageManager), 无法下沉 commonMain。
+ *
+ * # 资源读取
+ *
+ * [DefaultDataShared] 通过 [DefaultDataResourceProvider] 接口读取资源, app 端在
+ * `App.onCreate` 早期注册实现 (读 composeResources 打进 assets 的 [DEFAULT_DATA_ASSET_PREFIX] 下资源)。
+ *
+ * 模式参考 [io.legado.app.help.source.SourceHelp] (shared 下沉 + app 薄壳)。
+ */
 object DefaultData {
 
     fun upVersion() {
         if (LocalConfig.versionCode < AppConst.appInfo.versionCode) {
             Coroutine.async {
                 if (LocalConfig.needUpHttpTTS) {
-                    importDefaultHttpTTS()
+                    DefaultDataShared.importDefaultHttpTTS()
                 }
                 if (LocalConfig.needUpTxtTocRule) {
-                    importDefaultTocRules()
+                    DefaultDataShared.importDefaultTocRules()
                 }
                 if (LocalConfig.needUpDictRule) {
-                    importDefaultDictRules()
+                    DefaultDataShared.importDefaultDictRules()
                 }
             }.onError {
                 it.printOnDebug()
@@ -36,70 +62,35 @@ object DefaultData {
         }
     }
 
-    val httpTTS: List<HttpTTS> by lazy {
-        val json =
-            String(
-                appCtx.assets.open("defaultData${File.separator}httpTTS.json")
-                    .readBytes()
-            )
-        HttpTTS.fromJsonArray(json).getOrElse {
-            emptyList()
-        }
-    }
+    /**
+     * 默认阅读配置列表 (委托 [ReadConfigDefaults], 同一份 readConfig.json 已内联下沉)。
+     */
+    val readConfigs: List<ReadStyleConfig>
+        get() = ReadConfigDefaults.readConfigs
 
-    val readConfigs: List<ReadBookConfig.Config> by lazy {
-        val json = String(
-            appCtx.assets.open("defaultData${File.separator}${ReadBookConfig.configFileName}")
-                .readBytes()
-        )
-        GSON.fromJsonArray<ReadBookConfig.Config>(json).getOrNull()
-            ?: emptyList()
-    }
+    /** 默认 HttpTTS 列表 (委托 [DefaultDataShared])。 */
+    val httpTTS: List<HttpTTS>
+        get() = DefaultDataShared.httpTTS
 
-    val txtTocRules: List<TxtTocRule> by lazy {
-        val json = String(
-            appCtx.assets.open("defaultData${File.separator}txtTocRule.json")
-                .readBytes()
-        )
-        GSON.fromJsonArray<TxtTocRule>(json).getOrNull() ?: emptyList()
-    }
+    /** 默认 TxtToc 规则列表 (委托 [DefaultDataShared])。 */
+    val txtTocRules: List<TxtTocRule>
+        get() = DefaultDataShared.txtTocRules
 
-    val themeConfigs: List<ThemeConfig.Config> by lazy {
-        val json = String(
-            appCtx.assets.open("defaultData${File.separator}${ThemeConfig.configFileName}")
-                .readBytes()
-        )
-        GSON.fromJsonArray<ThemeConfig.Config>(json).getOrNull() ?: emptyList()
-    }
+    /** 默认字典规则列表 (委托 [DefaultDataShared])。 */
+    val dictRules: List<DictRule>
+        get() = DefaultDataShared.dictRules
 
-    val dictRules: List<DictRule> by lazy {
-        val json = String(
-            appCtx.assets.open("defaultData${File.separator}dictRules.json")
-                .readBytes()
-        )
-        GSON.fromJsonArray<DictRule>(json).getOrThrow()
-    }
+    /** 默认键盘助手列表 (委托 [DefaultDataShared])。 */
+    val keyboardAssists: List<KeyboardAssist>
+        get() = DefaultDataShared.keyboardAssists
 
-    val keyboardAssists: List<KeyboardAssist> by lazy {
-        val json = String(
-            appCtx.assets.open("defaultData${File.separator}keyboardAssists.json")
-                .readBytes()
-        )
-        GSON.fromJsonArray<KeyboardAssist>(json).getOrThrow()
-    }
+    /** 导入默认 HttpTTS (委托 [DefaultDataShared])。 */
+    suspend fun importDefaultHttpTTS() = DefaultDataShared.importDefaultHttpTTS()
 
-    fun importDefaultHttpTTS() {
-        appDb.httpTTSDao.deleteDefault()
-        appDb.httpTTSDao.insert(*httpTTS.toTypedArray())
-    }
+    /** 导入默认 TxtToc 规则 (委托 [DefaultDataShared])。 */
+    suspend fun importDefaultTocRules() = DefaultDataShared.importDefaultTocRules()
 
-    fun importDefaultTocRules() {
-        appDb.txtTocRuleDao.deleteDefault()
-        appDb.txtTocRuleDao.insert(*txtTocRules.toTypedArray())
-    }
-
-    fun importDefaultDictRules() {
-        appDb.dictRuleDao.insert(*dictRules.toTypedArray())
-    }
+    /** 导入默认字典规则 (委托 [DefaultDataShared])。 */
+    suspend fun importDefaultDictRules() = DefaultDataShared.importDefaultDictRules()
 
 }

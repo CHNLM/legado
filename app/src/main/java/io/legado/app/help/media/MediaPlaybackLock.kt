@@ -3,8 +3,8 @@ package io.legado.app.help.media
 import android.annotation.SuppressLint
 import android.net.wifi.WifiManager
 import android.os.PowerManager
-import splitties.systemservices.powerManager
-import splitties.systemservices.wifiManager
+import io.legado.app.powerManager
+import io.legado.app.wifiManager
 
 /**
  * WakeLock + WifiLock 配对管理,均关闭引用计数以便重复 acquire/release。
@@ -23,7 +23,7 @@ class MediaPlaybackLock(
 
     private val wifiLock by lazy {
         @Suppress("DEPRECATION")
-        wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, tag)
+        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, tag)
             ?.apply { setReferenceCounted(false) }
     }
 

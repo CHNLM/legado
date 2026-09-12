@@ -2,12 +2,12 @@ package io.legado.app.help.config
 
 import android.content.SharedPreferences
 import android.os.Build
+import io.legado.app.App
 import io.legado.app.BuildConfig
-import io.legado.app.R
-import io.legado.app.constant.AppConst
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
-import io.legado.app.utils.canvasrecorder.CanvasRecorderFactory
+import io.legado.app.help.i18n.androidAppString
+import io.legado.app.ui.book.getRealBookSort
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefInt
 import io.legado.app.utils.getPrefString
@@ -15,28 +15,20 @@ import io.legado.app.utils.isNightMode
 import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefInt
 import io.legado.app.utils.putPrefString
+import io.legado.app.utils.removePref
 import io.legado.app.utils.sysConfiguration
 import io.legado.app.utils.toastOnUi
-import splitties.init.appCtx
+import kotlinx.coroutines.runBlocking
 
 @Suppress("MemberVisibilityCanBePrivate", "ConstPropertyName")
 object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
-
-    const val BOTTOM_BAR_HEIGHT_MIN = 36
-    const val BOTTOM_BAR_HEIGHT_MAX = 80
-    const val BOTTOM_BAR_HEIGHT_DEFAULT = 50
-    const val BOTTOM_BAR_ICON_MIN = 18
-    const val BOTTOM_BAR_ICON_MAX = 36
-    const val BOTTOM_BAR_ICON_DEFAULT = 24
-    const val BOTTOM_BAR_LABEL_DEFAULT = 0
-    const val defaultSpeechRate = 5
 
     // 缓存字段：热路径读取，监听器中重载
     var isCronet by cachedBoolPref(PreferKey.cronet)
     var userAgent by cachedPref(
         PreferKey.userAgent,
         { getPrefUserAgent() },
-        { appCtx.putPrefString(PreferKey.userAgent, it) },
+        { App.instance.putPrefString(PreferKey.userAgent, it) },
     )
     var themeMode by cachedStringPref(PreferKey.themeMode, "0")
     var useDefaultCover by cachedBoolPref(PreferKey.useDefaultCover, false)
@@ -52,22 +44,18 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var clickActionBR by cachedIntPref(PreferKey.clickActionBR, 1)
 
     val isEInkMode get() = themeMode == "3"
-    val optimizeRender get() = CanvasRecorderFactory.isSupport
 
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
         key ?: return
         reloadCachedPref(key)
         when (key) {
-            PreferKey.useZhLayout -> ReadBookConfig.useZhLayout =
-                appCtx.getPrefBoolean(PreferKey.useZhLayout)
-
             PreferKey.cronet -> if (isCronet) {
                 io.legado.app.help.http.Cronet.preDownload { success ->
                     if (success) {
                         io.legado.app.help.http.recreateOkHttpClient()
-                        appCtx.toastOnUi(R.string.cronet_enabled)
+                        App.instance.toastOnUi(androidAppString("cronet_enabled"))
                     } else {
-                        appCtx.toastOnUi(R.string.cronet_download_failed)
+                        App.instance.toastOnUi(androidAppString("cronet_download_failed"))
                     }
                 }
             }
@@ -83,32 +71,40 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
         set(value) {
             if (isNightTheme != value) {
-                appCtx.putPrefString(PreferKey.themeMode, if (value) "2" else "1")
+                App.instance.putPrefString(PreferKey.themeMode, if (value) "2" else "1")
             }
         }
 
     var showUnread by boolPref(PreferKey.showUnread, true)
+    var showBookshelfFastScroller by boolPref(PreferKey.showBookshelfFastScroller, true)
     var showLastUpdateTime by boolPref(PreferKey.showLastUpdateTime, false)
     var bookshelfListShowKind by boolPref(PreferKey.bookshelfListShowKind, false)
     var bookshelfListShowIntro by boolPref(PreferKey.bookshelfListShowIntro, false)
     var bookshelfListIntroLines by intPref(PreferKey.bookshelfListIntroLines, 2, 1..3)
-    var bookshelfCoverWidth by intPref(PreferKey.bookshelfCoverWidth, 90, 70..160)
+    var bookshelfCoverHeight by intPref(PreferKey.bookshelfCoverHeight, 120, 90..220)
+
+    // 与 BookSource.exploreStyle 同一套位编码 (低 3 位列数, 0x10 视频)
+    var searchLayout by intPref(PreferKey.searchLayout, 1)
 
     var bottomBarHeight by intPref(
         PreferKey.bottomBarHeight,
-        BOTTOM_BAR_HEIGHT_DEFAULT,
-        BOTTOM_BAR_HEIGHT_MIN..BOTTOM_BAR_HEIGHT_MAX,
+        AppConfigConstants.BOTTOM_BAR_HEIGHT_DEFAULT,
+        AppConfigConstants.BOTTOM_BAR_HEIGHT_MIN..AppConfigConstants.BOTTOM_BAR_HEIGHT_MAX,
     )
     var bottomBarIconSize by intPref(
         PreferKey.bottomBarIconSize,
-        BOTTOM_BAR_ICON_DEFAULT,
-        BOTTOM_BAR_ICON_MIN..BOTTOM_BAR_ICON_MAX,
+        AppConfigConstants.BOTTOM_BAR_ICON_DEFAULT,
+        AppConfigConstants.BOTTOM_BAR_ICON_MIN..AppConfigConstants.BOTTOM_BAR_ICON_MAX,
     )
 
     /**
      * 0 = unlabeled, 1 = labeled, 2 = selected, 3 = auto
      */
-    var bottomBarLabelMode by intPref(PreferKey.bottomBarLabelMode, BOTTOM_BAR_LABEL_DEFAULT, 0..3)
+    var bottomBarLabelMode by intPref(
+        PreferKey.bottomBarLabelMode,
+        AppConfigConstants.BOTTOM_BAR_LABEL_DEFAULT,
+        0..3
+    )
 
     var bookshelfShowGroupCount by boolPref(PreferKey.bookshelfShowGroupCount, true)
 
@@ -118,8 +114,8 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     var bookshelfLayout: Int
         get() {
-            val value = appCtx.getPrefInt(PreferKey.bookshelfLayout, 0)
-            if (!appCtx.getPrefBoolean("bookshelfLayoutMigrated", false)) {
+            val value = App.instance.getPrefInt(PreferKey.bookshelfLayout, 0)
+            if (!App.instance.getPrefBoolean("bookshelfLayoutMigrated", false)) {
                 val migrated = when (value) {
                     1 -> 3
                     2 -> 4
@@ -127,14 +123,14 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                     4 -> 6
                     else -> value
                 }
-                appCtx.putPrefInt(PreferKey.bookshelfLayout, migrated)
-                appCtx.putPrefBoolean("bookshelfLayoutMigrated", true)
+                App.instance.putPrefInt(PreferKey.bookshelfLayout, migrated)
+                App.instance.putPrefBoolean("bookshelfLayoutMigrated", true)
                 return migrated
             }
             return value
         }
         set(value) {
-            appCtx.putPrefInt(PreferKey.bookshelfLayout, value)
+            App.instance.putPrefInt(PreferKey.bookshelfLayout, value)
         }
 
     var bookshelfFixedWidthMode by boolPref(PreferKey.bookshelfFixedWidthMode, false)
@@ -155,6 +151,8 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     var showHome by boolPref(PreferKey.showHome, true)
 
+    var bottomNavItemOrder by stringPref(PreferKey.bottomNavItemOrder, "")
+
     val autoRefreshBook by boolPref(PreferKey.autoRefresh)
 
     var threadCount by intPref(PreferKey.threadCount, 16)
@@ -164,32 +162,31 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var importBookPath by stringPrefClearOnEmpty("importBookPath")
 
     var ttsFlowSys by boolPref(PreferKey.ttsFollowSys, true)
-    var ttsSpeechRate by intPref(PreferKey.ttsSpeechRate, defaultSpeechRate)
+    var ttsSpeechRate by intPref(PreferKey.ttsSpeechRate, AppConfigConstants.defaultSpeechRate)
     var ttsTimer by intPref(PreferKey.ttsTimer, 0)
 
-    val speechRatePlay: Int get() = if (ttsFlowSys) defaultSpeechRate else ttsSpeechRate
+    val readAloudWakeLock by boolPref(PreferKey.readAloudWakeLock, false)
+    val readAloudByPage by boolPref(PreferKey.readAloudByPage)
+    val mediaButtonPerNext by boolPref("mediaButtonPerNext", false)
+    val systemMediaControlCompatibilityChange by boolPref("systemMediaControlCompatibilityChange")
+
+    val speechRatePlay: Int get() = if (ttsFlowSys) AppConfigConstants.defaultSpeechRate else ttsSpeechRate
 
     var chineseConverterType by intPref(PreferKey.chineseConverterType)
     var systemTypefaces by intPref(PreferKey.systemTypefaces)
-
-    var elevation: Int
-        get() = if (isEInkMode) 0 else appCtx.getPrefInt(
-            PreferKey.barElevation,
-            AppConst.sysElevation,
-        )
-        set(value) {
-            appCtx.putPrefInt(PreferKey.barElevation, value)
-        }
+    var fontFolder by stringPref(PreferKey.fontFolder)
+    var processText by boolPref(PreferKey.processText, true)
+    var checkSource by stringPref(PreferKey.checkSource)
 
     var readUrlInBrowser by boolPref(PreferKey.readUrlOpenInBrowser)
 
     var exportCharset: String
         get() {
-            val c = appCtx.getPrefString(PreferKey.exportCharset)
+            val c = App.instance.getPrefString(PreferKey.exportCharset)
             return if (c.isNullOrBlank()) "UTF-8" else c
         }
         set(value) {
-            appCtx.putPrefString(PreferKey.exportCharset, value)
+            App.instance.putPrefString(PreferKey.exportCharset, value)
         }
 
     var exportUseReplace by boolPref(PreferKey.exportUseReplace, true)
@@ -203,6 +200,8 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var changeSourceCheckAuthor by boolPref(PreferKey.changeSourceCheckAuthor)
     var ttsEngine by stringPref(PreferKey.ttsEngine)
     var webPort by intPref(PreferKey.webPort, 1122)
+    val webServiceWakeLock by boolPref(PreferKey.webServiceWakeLock, false)
+    var webService by boolPref(PreferKey.webService)
     var tocUiUseReplace by boolPref(PreferKey.tocUiUseReplace)
     var tocCountWords by boolPref(PreferKey.tocCountWords, true)
     var enableReadRecord by boolPref(PreferKey.enableReadRecord, true)
@@ -215,9 +214,10 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var contentSelectSpeakMod by intPref(PreferKey.contentSelectSpeakMod)
     var batchChangeSourceDelay by intPref(PreferKey.batchChangeSourceDelay)
 
-    val importKeepName by boolPref(PreferKey.importKeepName)
-    val importKeepGroup by boolPref(PreferKey.importKeepGroup)
+    var importKeepName by boolPref(PreferKey.importKeepName)
+    var importKeepGroup by boolPref(PreferKey.importKeepGroup)
     var importKeepEnable by boolPref(PreferKey.importKeepEnable, false)
+    var localBookImportSort by intPref(PreferKey.localBookImportSort)
 
     var previewImageByClick by boolPref(PreferKey.previewImageByClick, false)
     var preDownloadNum by intPref(PreferKey.preDownloadNum, 10)
@@ -227,11 +227,17 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val mediaButtonOnExit by boolPref("mediaButtonOnExit", true)
     val readAloudByMediaButton by boolPref(PreferKey.readAloudByMediaButton, false)
     val replaceEnableDefault by boolPref(PreferKey.replaceEnableDefault, true)
+    val webDavUrl by stringPref(PreferKey.webDavUrl)
+    val webDavAccount by stringPref(PreferKey.webDavAccount)
+    var webDavPassword by stringPref(PreferKey.webDavPassword)
     val webDavDir by stringPref(PreferKey.webDavDir, "legado")
     val webDavDeviceName by stringPref(PreferKey.webDavDeviceName, Build.MODEL)
     val recordHeapDump by boolPref(PreferKey.recordHeapDump, false)
-    val loadCoverOnlyWifi by boolPref(PreferKey.loadCoverOnlyWifi, false)
     val showAddToShelfAlert by boolPref(PreferKey.showAddToShelfAlert, true)
+    val coverShowName by boolPref(PreferKey.coverShowName, true)
+    val coverShowNameN by boolPref(PreferKey.coverShowNameN, true)
+    val coverShowAuthor by boolPref(PreferKey.coverShowAuthor, true)
+    val coverShowAuthorN by boolPref(PreferKey.coverShowAuthorN, true)
 
     var bookInfoDeleteAlert by boolPref(PreferKey.bookInfoDeleteAlert, true)
 
@@ -247,9 +253,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val streamReadAloudAudio by boolPref(PreferKey.streamReadAloudAudio, false)
     val doublePageHorizontal by stringPref(PreferKey.doublePageHorizontal)
     val progressBarBehavior by stringPref(PreferKey.progressBarBehavior, "page")
-    val volumeKeyPage by boolPref(PreferKey.volumeKeyPage, true)
-    val volumeKeyPageOnPlay by boolPref(PreferKey.volumeKeyPageOnPlay, true)
-    val mouseWheelPage by boolPref(PreferKey.mouseWheelPage, true)
+    var prevKeys by stringPref(PreferKey.prevKeys)
+    var nextKeys by stringPref(PreferKey.nextKeys)
+    val keepLight by stringPref(PreferKey.keepLight)
+
+    var precisionSearch by boolPref(PreferKey.precisionSearch)
 
     var searchScope by nonNullStringPref("searchScope", "")
     var searchGroup by nonNullStringPref("searchGroup", "")
@@ -258,12 +266,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var bookshelfSort by intPref(PreferKey.bookshelfSort, 0)
 
     fun getBookSortByGroupId(groupId: Long): Int {
-        return appDb.bookGroupDao.getByID(groupId)?.getRealBookSort()
+        return runBlocking { appDb.bookGroupDao.getByID(groupId) }?.getRealBookSort()
             ?: bookshelfSort
     }
 
     private fun getPrefUserAgent(): String {
-        val ua = appCtx.getPrefString(PreferKey.userAgent)
+        val ua = App.instance.getPrefString(PreferKey.userAgent)
         if (ua.isNullOrBlank()) {
             return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + BuildConfig.Cronet_Main_Version + " Safari/537.36"
         }
@@ -275,11 +283,13 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     var sourceEditMaxLine: Int
         get() {
-            val maxLine = appCtx.getPrefInt(PreferKey.sourceEditMaxLine, Int.MAX_VALUE)
-            return if (maxLine < 10) Int.MAX_VALUE else maxLine
+            // 设置界面 range 5..30, 存储值不在该区间一律视为不限制 (兼容旧版写入的
+            // Int.MAX_VALUE 与残留脏值), 返回 Int.MAX_VALUE 供 maxLines 直接消费
+            val maxLine = App.instance.getPrefInt(PreferKey.sourceEditMaxLine, Int.MAX_VALUE)
+            return if (maxLine in 5..30) maxLine else Int.MAX_VALUE
         }
         set(value) {
-            appCtx.putPrefInt(PreferKey.sourceEditMaxLine, value)
+            App.instance.putPrefInt(PreferKey.sourceEditMaxLine, value)
         }
 
     var audioPlayUseWakeLock by boolPref(PreferKey.audioPlayWakeLock)
@@ -289,8 +299,8 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             * clickActionML * clickActionMC * clickActionMR
             * clickActionBL * clickActionBC * clickActionBR != 0
         ) {
-            appCtx.putPrefInt(PreferKey.clickActionMC, 0)
-            appCtx.toastOnUi("当前没有配置菜单区域,自动恢复中间区域为菜单.")
+            App.instance.putPrefInt(PreferKey.clickActionMC, 0)
+            App.instance.toastOnUi("当前没有配置菜单区域,自动恢复中间区域为菜单.")
         }
     }
 
@@ -327,6 +337,16 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var welcomeImage by stringPref(PreferKey.welcomeImage)
     var welcomeShowText by boolPref(PreferKey.welcomeShowText, true)
     var welcomeShowIcon by boolPref(PreferKey.welcomeShowIcon, true)
+    var welcomeShowTime by intPref(PreferKey.welcomeShowTime, 600, 600..3000)
     var welcomeImageDark by stringPref(PreferKey.welcomeImageDark)
+    var welcomeShowTextDark by boolPref(PreferKey.welcomeShowTextDark, true)
+    var welcomeShowIconDark by boolPref(PreferKey.welcomeShowIconDark, true)
+    val enableWelcome by boolPref(PreferKey.enableWelcome, true)
+
+    /** 恢复默认 UA:清 pref 并立即重载缓存,不等监听器 */
+    fun resetUserAgent() {
+        App.instance.removePref(PreferKey.userAgent)
+        reloadCachedPref(PreferKey.userAgent)
+    }
 
 }

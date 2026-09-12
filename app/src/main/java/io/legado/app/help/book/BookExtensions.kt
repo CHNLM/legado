@@ -4,87 +4,44 @@ package io.legado.app.help.book
 
 import android.net.Uri
 import androidx.core.net.toUri
-import com.script.buildScriptBindings
-import com.script.rhino.RhinoScriptEngine
-import io.legado.app.constant.AppLog
-import io.legado.app.constant.AppPattern
-import io.legado.app.constant.BookSourceType
-import io.legado.app.constant.BookType
+import io.legado.app.App
 import io.legado.app.data.appDb
-import io.legado.app.data.entities.BaseBook
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookSource
 import io.legado.app.exception.NoStackTraceException
-import io.legado.app.help.RuleBigDataHelp
 import io.legado.app.help.config.AppConfig
-import io.legado.app.model.fileBook.FileBook
 import io.legado.app.utils.FileDoc
-import io.legado.app.utils.GSON
-import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.exists
 import io.legado.app.utils.find
 import io.legado.app.utils.inputStream
 import io.legado.app.utils.isUri
-import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.toastOnUi
-import splitties.init.appCtx
+import kotlinx.coroutines.runBlocking
 import java.io.File
-import java.time.LocalDate
-import java.time.Period.between
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.max
-import kotlin.math.min
 
-val BaseBook.isVideo: Boolean
-    get() = isType(BookType.video)
-val BaseBook.isAudio: Boolean
-    get() = isType(BookType.audio)
-
-val BaseBook.isImage: Boolean
-    get() = isType(BookType.image)
-
-val BaseBook.isLocal: Boolean
-    get() {
-        if (type == 0) {
-            return origin == BookType.localTag || origin.startsWith(BookType.webDavTag)
-        }
-        return isType(BookType.local)
-    }
-
-val BaseBook.isLocalTxt: Boolean
-    get() = isLocal && originName.endsWith(".txt", true)
-
-val BaseBook.isEpub: Boolean
-    get() = isLocal && originName.endsWith(".epub", true)
-
-val BaseBook.isPdf: Boolean
-    get() = isLocal && originName.endsWith(".pdf", true)
-
-val BaseBook.isOnLineTxt: Boolean
-    get() = !isLocal && isType(BookType.text)
-
-val BaseBook.isWebFile: Boolean
-    get() = isType(BookType.webFile)
-
-val BaseBook.isRss: Boolean
-    get() = isType(BookType.rss)
-
-val BaseBook.isUpError: Boolean
-    get() = isType(BookType.updateError)
-
-val BaseBook.isArchive: Boolean
-    get() = isType(BookType.archive)
-
-val BaseBook.isNotShelf: Boolean
-    get() = isType(BookType.notShelf)
-
-val BaseBook.archiveName: String
-    get() {
-        if (!isArchive) throw NoStackTraceException("Book is not deCompressed from archive")
-        // local_book::archive.rar
-        // webDav::https://...../archive.rar
-        return origin.substringAfter("::").substringAfterLast("/")
-    }
+/*
+ * Book 扩展函数 app 端保留区。
+ *
+ * 原文件中的纯类型位运算扩展 (isVideo/isAudio/isImage/isRss/isWebFile/isUpError/
+ * isArchive/isNotShelf/isLocal/isLocalTxt/isEpub/isPdf/isOnLineTxt/archiveName/
+ * getRemoteUrl/setType/addType/removeType/removeAllBookType/clearType/isType/upType)
+ * 已下沉到 shared BookExtensionsShared.kt (供 WebBook/BookChapterList/BookContent
+ * 在 shared 中使用)。
+ *
+ * 原文件中的显示相关扩展 (getUseReplaceRule/readSimulating/simulatedTotalChapterNum)
+ * 已下沉到 shared BookDisplayExtensionsShared.kt (依赖 AppConfigProviders/
+ * AppDbProviders/ChineseUtils, 经 provider 间接访问)。
+ *
+ * 跨模块同包名同签名扩展自动合并, 消费方 import 零改动。
+ * 注意: 同包名同签名扩展函数不允许在两个模块同时定义, 已从本文件删除已下沉的扩展。
+ *
+ * 本文件仅保留依赖 app 平台绑定 (Uri/FileDoc/AppConfig.appCtx/
+ * ReadBook/ReadTimeRecorder/BookHelp 等) 的扩展。
+ * 对已下沉扩展的调用 (如 sync/migrateTo 调用 getUseReplaceRule,
+ * getUnreadChapterNum 调用 simulatedTotalChapterNum) 经跨模块同包名同签名扩展
+ * 自动合并解析, 无需 import。
+ */
 
 private val localUriCache by lazy {
     ConcurrentHashMap<String, Uri>()
@@ -104,7 +61,7 @@ fun Book.getLocalUri(): Uri {
         Uri.fromFile(File(bookUrl))
     }
     //先检测uri是否有效,这个比较快
-    uri.inputStream(appCtx).getOrNull()?.use {
+    uri.inputStream(App.instance).getOrNull()?.use {
         localUriCache[bookUrl] = uri
     }?.let {
         return uri
@@ -118,7 +75,7 @@ fun Book.getLocalUri(): Uri {
         val treeUri = defaultBookDir.toUri()
         val treeFileDoc = FileDoc.fromUri(treeUri, true)
         if (!treeFileDoc.exists()) {
-            appCtx.toastOnUi("书籍保存目录失效，请重新设置！")
+            App.instance.toastOnUi("书籍保存目录失效，请重新设置！")
         } else {
             val fileDoc = treeFileDoc.find(originName, 5, 100)
             if (fileDoc != null) {
@@ -171,63 +128,14 @@ fun Book.removeLocalUriCache() {
     localUriCache.remove(bookUrl)
 }
 
-fun BaseBook.getRemoteUrl(): String? {
-    if (origin.startsWith(BookType.webDavTag)) {
-        return origin.substring(BookType.webDavTag.length)
-    }
-    return null
-}
-
-fun BaseBook.setType(@BookType.Type vararg types: Int) {
-    type = 0
-    addType(*types)
-}
-
-fun BaseBook.addType(@BookType.Type vararg types: Int) {
-    types.forEach {
-        type = type or it
-    }
-}
-
-fun BaseBook.removeType(@BookType.Type vararg types: Int) {
-    types.forEach {
-        type = type and it.inv()
-    }
-}
-
-fun BaseBook.removeAllBookType() {
-    removeType(BookType.allBookType)
-}
-
-fun BaseBook.clearType() {
-    type = 0
-}
-
-fun BaseBook.isType(@BookType.Type bookType: Int): Boolean = type and bookType > 0
-
-fun BaseBook.upType() {
-    if (type < 8) {
-        type = when (type) {
-            BookSourceType.video -> BookType.video
-            BookSourceType.image -> BookType.image
-            BookSourceType.audio -> BookType.audio
-            BookSourceType.file -> BookType.webFile
-            else -> BookType.text
-        }
-        if (origin == BookType.localTag || origin.startsWith(BookType.webDavTag)) {
-            type = type or BookType.local
-        }
-    }
-}
-
 fun Book.sync(oldBook: Book) {
-    val curBook = appDb.bookDao.getBook(oldBook.bookUrl)!!
+    val curBook = runBlocking { appDb.bookDao.getBook(oldBook.bookUrl) }!!
     durChapterTime = curBook.durChapterTime
     durChapterPos = curBook.durChapterPos
     if (durChapterIndex != curBook.durChapterIndex) {
         durChapterIndex = curBook.durChapterIndex
         val replaceRules = ContentProcessor.get(this).getTitleReplaceRules()
-        appDb.bookChapterDao.getChapter(bookUrl, durChapterIndex)?.let {
+        runBlocking { appDb.bookChapterDao.getChapter(bookUrl, durChapterIndex) }?.let {
             durChapterTitle = it.getDisplayTitle(replaceRules, getUseReplaceRule())
         }
     }
@@ -236,133 +144,9 @@ fun Book.sync(oldBook: Book) {
 }
 
 fun Book.update() {
-    appDb.bookDao.update(this)
-}
-
-fun BaseBook.primaryStr(): String {
-    return origin + bookUrl
-}
-
-fun Book.updateTo(newBook: Book): Book {
-    newBook.durChapterIndex = durChapterIndex
-    newBook.durChapterTitle = durChapterTitle
-    newBook.durChapterPos = durChapterPos
-    newBook.durChapterTime = durChapterTime
-    newBook.group = group
-    newBook.order = order
-    newBook.customCoverUrl = customCoverUrl
-    newBook.customIntro = customIntro
-    newBook.customTag = customTag
-    newBook.canUpdate = canUpdate
-    newBook.readConfig = readConfig
-    val variableMap = variableMap.toMutableMap()
-    variableMap.keys.removeIf {
-        newBook.hasVariable(it)
-    }
-    newBook.variableMap.putAll(variableMap)
-    newBook.variable = GSON.toJson(newBook.variableMap)
-    return newBook
-}
-
-fun Book.hasVariable(key: String): Boolean {
-    return variableMap.contains(key) || RuleBigDataHelp.hasBookVariable(bookUrl, key)
-}
-
-fun Book.getFolderNameNoCache(): String {
-    return name.replace(AppPattern.fileNameRegex, "").let {
-        it.substring(0, min(9, it.length)) + MD5Utils.md5Encode16(bookUrl)
-    }
+    runBlocking { appDb.bookDao.update(this@update) }
 }
 
 fun Book.getBookSource(): BookSource? {
-    return appDb.bookSourceDao.getBookSource(origin)
-}
-
-fun Book.isLocalModified(): Boolean {
-    return isLocal && FileBook.getLastModified(this).getOrDefault(0L) > latestChapterTime
-}
-
-fun BaseBook.releaseHtmlData() {
-    infoHtml = null
-    tocHtml = null
-}
-
-fun BaseBook.isSameNameAuthor(other: Any?): Boolean {
-    if (other is BaseBook) {
-        return name == other.name && author == other.author
-    }
-    return false
-}
-
-fun Book.getExportFileName(suffix: String): String {
-    val default = "$name 作者：${getRealAuthor()}.$suffix"
-    val jsStr = AppConfig.bookExportFileName
-    if (jsStr.isNullOrBlank()) {
-        return default.normalizeFileName()
-    }
-    val bindings = buildScriptBindings { bindings ->
-        bindings["epubIndex"] = ""// 兼容老版本,修复可能存在的错误
-        bindings["name"] = name
-        bindings["author"] = getRealAuthor()
-    }
-    return kotlin.runCatching {
-        RhinoScriptEngine.eval(jsStr, bindings).toString() + "." + suffix
-    }.onFailure {
-        AppLog.put("导出书名规则错误,使用默认规则\n${it.localizedMessage}", it)
-    }.getOrDefault(default).normalizeFileName()
-}
-
-/**
- * 获取分割文件后的文件名
- */
-fun Book.getExportFileName(
-    suffix: String,
-    epubIndex: Int,
-    jsStr: String? = AppConfig.episodeExportFileName
-): String {
-    // 默认规则
-    val default = "$name 作者：${getRealAuthor()} [${epubIndex}].$suffix"
-    if (jsStr.isNullOrBlank()) {
-        return default
-    }
-    val bindings = buildScriptBindings { bindings ->
-        bindings["name"] = name
-        bindings["author"] = getRealAuthor()
-        bindings["epubIndex"] = epubIndex
-    }
-    return kotlin.runCatching {
-        RhinoScriptEngine.eval(jsStr, bindings).toString() + "." + suffix
-    }.onFailure {
-        AppLog.put("导出书名规则错误,使用默认规则\n${it.localizedMessage}", it)
-    }.getOrDefault(default).normalizeFileName()
-}
-
-// 根据当前日期计算章节总数
-fun Book.simulatedTotalChapterNum(): Int {
-    return if (readSimulating()) {
-        val currentDate = LocalDate.now()
-        val daysPassed = between(config.startDate, currentDate).days + 1
-        // 计算当前应该解锁到哪一章
-        val chaptersToUnlock =
-            max(0, (config.startChapter ?: 0) + (daysPassed * config.dailyChapters))
-        min(totalChapterNum, chaptersToUnlock)
-    } else {
-        totalChapterNum
-    }
-}
-
-fun Book.readSimulating(): Boolean {
-    return config.readSimulating
-}
-
-fun tryParesExportFileName(jsStr: String): Boolean {
-    val bindings = buildScriptBindings { bindings ->
-        bindings["name"] = "name"
-        bindings["author"] = "author"
-        bindings["epubIndex"] = "epubIndex"
-    }
-    return runCatching {
-        RhinoScriptEngine.eval(jsStr, bindings)
-        true
-    }.getOrDefault(false)
+    return runBlocking { appDb.bookSourceDao.getBookSource(origin) }
 }

@@ -2,6 +2,7 @@
 
 package io.legado.app.utils
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Color
 import android.net.Uri
@@ -19,11 +20,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 import androidx.fragment.app.DialogFragment
-import io.legado.app.R
-import io.legado.app.lib.dialogs.alert
-import io.legado.app.lib.dialogs.customView
-import io.legado.app.lib.dialogs.okButton
-import io.legado.app.ui.widget.dialog.TextDialog
+import io.legado.app.help.i18n.androidAppString
+import io.legado.app.ui.compose.dialogs.alert
+import io.legado.app.ui.root.AppNavigatorProviders
+import io.legado.app.ui.root.AppOverlay
 
 inline fun <reified T : DialogFragment> AppCompatActivity.showDialogFragment(
     arguments: Bundle.() -> Unit = {}
@@ -73,12 +73,34 @@ val WindowManager.windowSize: DisplayMetrics
         return displayMetrics
     }
 
-fun Activity.fullScreen() {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        window.setDecorFitsSystemWindows(true)
+/**
+ * 真实屏幕尺寸 (含状态栏/导航栏/cutout 的完整物理区): R+ `maximumWindowMetrics`,
+ * 低版本 `getRealMetrics` (对照原版 setCoverFromUri 同款)。
+ * 与 [windowSize] (扣系统栏的应用可用区) 相对 —— 启动图 edge-to-edge 铺满全屏, 裁剪/解码
+ * 必须用本扩展, 否则竖屏构图少算状态栏一条导致比例错位。
+ */
+fun WindowManager.realScreenSize(): android.graphics.Point {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val bounds = maximumWindowMetrics.bounds
+        android.graphics.Point(bounds.width(), bounds.height())
+    } else {
+        val metrics = DisplayMetrics()
+        defaultDisplay.getRealMetrics(metrics)
+        android.graphics.Point(metrics.widthPixels, metrics.heightPixels)
     }
-    window.decorView.systemUiVisibility =
-        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+}
+
+/**
+ * 内容铺到系统栏之后 (edge-to-edge): insets 全量派发给应用, 由各界面自行避让
+ * (Compose 侧 statusBarsPadding / navigationBarsPadding / imePadding)。
+ *
+ * 只留官方一条开关 —— 旧实现 `setDecorFitsSystemWindows(true)` 与手写
+ * `LAYOUT_FULLSCREEN|LAYOUT_STABLE` 语义相反 (前者要 decor 代为避让, 后者要铺满)。
+ * 不用 androidx `enableEdgeToEdge()`: 它会改两栏颜色与 navigationBarContrastEnforced,
+ * 而这两项归 ThemeStore (setStatusBarColorAuto / setNavigationBarColorAuto)。
+ */
+fun Activity.edgeToEdge() {
+    WindowCompat.setDecorFitsSystemWindows(window, false)
     window.clearFlags(
         WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS
                 or WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION
@@ -132,9 +154,15 @@ fun Activity.setLightStatusBar(isLightBar: Boolean) {
 /**
  * 设置导航栏颜色
  */
+@SuppressLint("InlinedApi") // SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR 是内联常量, API<26 被忽略, 安全
 fun Activity.setNavigationBarColorAuto(@ColorInt color: Int) {
-    val isLightBor = ColorUtils.isColorLight(color)
     window.navigationBarColor = color
+    setLightNavigationBar(ColorUtils.isColorLight(color))
+}
+
+/** 导航栏图标明暗 (与底色解耦: 壁纸页底色透明, 明暗按壁纸贴边像素判) */
+@SuppressLint("InlinedApi") // SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR 是内联常量, API<26 被忽略, 安全
+fun Activity.setLightNavigationBar(isLightBor: Boolean) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         window.insetsController?.let {
             if (isLightBor) {
@@ -186,25 +214,23 @@ fun Activity.toggleSystemBar(show: Boolean) {
 
 /**
  * 显示目录help下的帮助文档
+ * 帮助文档对话框已下沉 shared (HelpDialog): 经 help Overlay 读 web/help/md/{fileName}.md 渲染
  */
 fun AppCompatActivity.showHelp(fileName: String) {
-    val mdText = String(assets.open("web/help/md/${fileName}.md").readBytes())
-    showDialogFragment(TextDialog(getString(R.string.help), mdText, TextDialog.Mode.MD))
+    AppNavigatorProviders.get().showOverlay(
+        AppOverlay.Dialog(key = "help", payload = fileName)
+    )
 }
 
 /**
  * 显示导出成功对话框
  */
 fun Activity.showExportSuccess(uri: Uri) {
-    alert(R.string.export_success) {
+    alert(androidAppString("export_success")) {
         if (uri.toString().isAbsUrl()) {
             setMessage(io.legado.app.help.DirectLinkUpload.getSummary())
         }
-        val alertBinding = io.legado.app.databinding.DialogEditTextBinding.inflate(layoutInflater).apply {
-            editView.hint = getString(R.string.path)
-            editView.setText(uri.toString())
-        }
-        customView { alertBinding.root }
+        editTextView(hint = androidAppString("path"), text = uri.toString())
         okButton {
             sendToClip(uri.toString())
         }
@@ -215,15 +241,11 @@ fun Activity.showExportSuccess(uri: Uri) {
  * 显示导出成功对话框 (Fragment版本)
  */
 fun androidx.fragment.app.Fragment.showExportSuccess(uri: Uri) {
-    alert(R.string.export_success) {
+    alert(androidAppString("export_success")) {
         if (uri.toString().isAbsUrl()) {
             setMessage(io.legado.app.help.DirectLinkUpload.getSummary())
         }
-        val alertBinding = io.legado.app.databinding.DialogEditTextBinding.inflate(layoutInflater).apply {
-            editView.hint = getString(R.string.path)
-            editView.setText(uri.toString())
-        }
-        customView { alertBinding.root }
+        editTextView(hint = androidAppString("path"), text = uri.toString())
         okButton {
             requireContext().sendToClip(uri.toString())
         }

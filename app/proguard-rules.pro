@@ -41,6 +41,13 @@
 # @Keep 通用规则（项目内大量类已使用 @Keep，简化重复 -keep）
 ############################
 -keep,allowoptimization @androidx.annotation.Keep class * { *; }
+# AnalyzeRuleCore 下沉 commonMain 后无法用 androidx @Keep (无 common 变体), 按类名 keep (JS 反射调用其方法)
+-keep,allowoptimization class io.legado.app.model.analyzeRule.AnalyzeRuleCore { *; }
+
+# Android-KMP library 的 consumer keep rules 发布在 AGP 8.13 尚不可用，
+# 先由最终 app 统一承载 shared/quickjs 的反射与 JNI 保留规则。
+-include ../shared/consumer-rules.pro
+-include ../modules/quickjs/consumer-rules.pro
 -keepclassmembers,allowoptimization class * {
     @androidx.annotation.Keep <methods>;
     @androidx.annotation.Keep <fields>;
@@ -50,12 +57,14 @@
 ############################
 # 业务：JS 引擎调用的 Java 类
 ############################
--keep class * extends io.legado.app.help.JsExtensions { *; }
+-keep class * extends io.legado.app.help.JsExtensionsJvm { *; }
 
 ############################
 # 业务：数据实体（Gson 反射 + Room + JS 访问）
 ############################
 -keep class **.data.entities.** { *; }
+-keep class io.legado.app.model.fileBook.ZipEntry { *; }
+-keep class io.legado.app.model.fileBook.ZipImageCache { *; }
 
 ############################
 # 异常类型：保留类名以便堆栈和反射查找
@@ -76,6 +85,9 @@
     cn.hutool.core.util.** { *; }
 -keep class cn.hutool.crypto.** { *; }
 -dontwarn cn.hutool.**
+# rhino compileOnly 不进产物,适配层残留引用仅警告豁免
+-dontwarn org.mozilla.javascript.**
+-dontwarn com.script.*
 
 ############################
 # OkHttp（保留给 js 调用）
@@ -83,12 +95,6 @@
 -keep class okhttp3.*{*;}
 -keepclassmembers class okhttp3.** {    *** protocol(...);}
 -dontwarn okhttp3.internal.**
-
-############################
-# JsonPath
-############################
--keep class com.jayway.jsonpath.** { *; }
--dontwarn com.jayway.jsonpath.**
 
 ############################
 # Markwon
@@ -123,16 +129,17 @@
 }
 
 ############################
-# AndroidX activity：JsActivity 通过反射设置 OnBackPressedCallback
-############################
--keepclassmembers class androidx.activity.OnBackPressedCallback {
-    public boolean isEnabled();
-    public void setEnabled(boolean);
-}
-
-############################
 # 静默无关警告
 ############################
 -dontwarn javax.annotation.**
 -dontwarn org.codehaus.**
 -dontwarn java.lang.invoke.StringConcatFactory
+
+############################
+# @file:JvmName 合成类跨模块引用加固（顶级 Kotlin 函数宿主类）
+############################
+-keep class io.legado.app.utils.GsonStreamExtensions { *; }
+-keep class io.legado.app.utils.EventBusObserveExtensions { *; }
+-keep class io.legado.app.utils.ConvertExtensionsAndroid { *; }
+-keep class io.legado.app.help.IntentDataAndroid { *; }
+-keep class io.legado.app.help.storage.BackupAESAndroid { *; }

@@ -1,47 +1,51 @@
 package io.legado.app.ui.association
 
+import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Bundle
-import androidx.appcompat.app.AppCompatActivity
 import androidx.core.net.toUri
+import androidx.core.os.BundleCompat
 import androidx.documentfile.provider.DocumentFile
-import androidx.fragment.app.DialogFragment
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
-import io.legado.app.R
 import io.legado.app.constant.AppLog
 import io.legado.app.exception.InvalidBooksDirException
+import io.legado.app.help.IntentData
 import io.legado.app.help.config.AppConfig
-import io.legado.app.lib.dialogs.alert
-import io.legado.app.lib.dialogs.noButton
-import io.legado.app.lib.dialogs.okButton
-import io.legado.app.lib.dialogs.onCancelled
-import io.legado.app.lib.dialogs.onDismiss
-import io.legado.app.lib.dialogs.yesButton
+import io.legado.app.help.i18n.androidAppString
 import io.legado.app.lib.permission.Permissions
 import io.legado.app.lib.permission.PermissionsCompat
+import io.legado.app.ui.compose.dialogs.alert
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.file.registerHandleFile
+import io.legado.app.ui.main.MainActivity
+import io.legado.app.ui.root.AppNavigatorProviders
+import io.legado.app.ui.root.AppOverlay
+import io.legado.app.ui.root.LaunchRequest
+import io.legado.app.ui.root.LaunchRequestBus
+import io.legado.app.ui.root.toReadRoute
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.canRead
 import io.legado.app.utils.checkWrite
 import io.legado.app.utils.getFile
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.readUri
-import io.legado.app.utils.showDialogFragment
-import io.legado.app.utils.startActivityForBook
+import io.legado.app.utils.startActivity
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import splitties.init.appCtx
 import java.io.File
 import java.io.FileOutputStream
 
-class FileAssociationFragment() : Fragment() {
+/**
+ * 文件关联导入的一次性透明壳。isShellHost 由添加方决定：为 true 时 finishActivity 会 finish 宿主
+ * Activity（独立壳场景），默认 false 只移除自身，不 finish 宿主（挂在 MainActivity 上的默认行为）。
+ */
+class FileAssociationFragment(private val isShellHost: Boolean = false) : Fragment() {
 
-    constructor(uri: Uri) : this() {
+    constructor(uri: Uri, isShellHost: Boolean = false) : this(isShellHost) {
         arguments = Bundle().apply {
             putParcelable("uri", uri)
         }
@@ -50,7 +54,7 @@ class FileAssociationFragment() : Fragment() {
     private val viewModel by viewModels<FileAssociationViewModel>()
     private val localBookTreeSelect by lazy {
         registerHandleFile { result ->
-            val uri = arguments?.getParcelable<Uri>("uri") ?: return@registerHandleFile
+            val uri = argUri ?: return@registerHandleFile
             result.uri?.let { treeUri ->
                 AppConfig.defaultBookTreeUri = treeUri.toString()
                 importBook(treeUri, uri)
@@ -58,11 +62,14 @@ class FileAssociationFragment() : Fragment() {
         }
     }
 
-    private val isShell get() = activity is AssociationActivity
+    private val isShell get() = isShellHost
+
+    private val argUri: Uri?
+        get() = arguments?.let { BundleCompat.getParcelable(it, "uri", Uri::class.java) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val uri = arguments?.getParcelable<Uri>("uri") ?: return removeSelf()
+        val uri = argUri ?: return removeSelf()
 
         viewModel.importBookLiveData.observe(this) {
             importBook(it)
@@ -75,16 +82,17 @@ class FileAssociationFragment() : Fragment() {
             finishActivity()
         }
         viewModel.openBookLiveData.observe(this) {
-            requireContext().startActivityForBook(it)
+            // 同进程直投路由引用: 类型分发由 Book.toReadRoute() 承担 (audio/video/manga/rss/reader),
+            // 壳内 asRoot (书架不进栈, 对照 master 直开), 宿主内是普通 push
+            LaunchRequestBus.dispatch(LaunchRequest.OpenRoute(it.toReadRoute(), asRoot = isShell))
+            // 壳内: Intent 只负责把主界面唤到前台 (不带载荷); 宿主内本就在前台
+            if (isShell) startActivity<MainActivity>()
             finishActivity()
-        }
-        viewModel.onLineImportLive.observe(this) {
-            handleOnLineImport(it)
         }
         viewModel.notSupportedLiveData.observe(this) { data ->
             alert(
-                title = appCtx.getString(R.string.draw),
-                message = appCtx.getString(R.string.file_not_supported, data.second)
+                title = androidAppString("draw"),
+                message = androidAppString("file_not_supported", data.second)
             ) {
                 yesButton {
                     importBook(data.first)
@@ -101,11 +109,16 @@ class FileAssociationFragment() : Fragment() {
         if (uri.isContentScheme() && uri.canRead()) {
             viewModel.dispatchIntent(uri)
         } else if (uri.scheme == "legado" || uri.scheme == "yuedu") {
-            viewModel.dispatchIntent(uri)
+            // 深链统一走 shared 解析链 (LegadoDeepLinkHandler → DeepLinkImportHost),
+            // 与 MainActivity.handleExternalIntent / 共享 WebViewRoute.interceptUrl 同一条链。
+            // 原 handleOnLineImport 的 when(uri.path) 手写分发已删除, path→类型映射由
+            // commonMain LegadoDeepLink.parse 承担 (缺 src 等非法格式静默丢弃)。
+            LegadoDeepLinkHandler.handle(uri.toString())
+            finishActivity()
         } else {
             PermissionsCompat.Builder()
                 .addPermissions(*Permissions.Group.STORAGE)
-                .rationale(R.string.tip_perm_request_storage)
+                .rationale(androidAppString("tip_perm_request_storage"))
                 .onGranted {
                     viewModel.dispatchIntent(uri)
                 }
@@ -117,70 +130,36 @@ class FileAssociationFragment() : Fragment() {
         }
     }
 
-    private fun handleOnLineImport(uri: Uri) {
-        val url = uri.getQueryParameter("src")
-        if (url.isNullOrEmpty()) {
-            finishActivity()
+    /**
+     * 文件 JSON 导入成功 (深链在线导入已统一走 shared [LegadoDeepLinkHandler],
+     * 此处仅剩 importJson 的文件导入分支; 类型映射在 BaseAssociationViewModel 复用
+     * shared JsonType.toDeepLinkImportType, 不再有第二份 when)。
+     */
+    private fun handleSuccess(it: Pair<DeepLinkImportType, Uri>) {
+        showImportDialog(it.first, it.second.toString())
+    }
+
+    /**
+     * 导入对话框改走 shared Overlay 分发 (对照 ImportOverlayDialogs 的 IntentData 侧信道模式):
+     * source 文本经 IntentData 存侧信道, overlay payload 只放 key。
+     * 原版 finishOnDismiss(isShell) 语义保留: 宿主是 MainActivity 时等 overlay 关闭后 finish。
+     */
+    private fun showImportDialog(type: DeepLinkImportType, source: String) {
+        if (isShell) {
+            // 独立透明壳: 壳内无主导航器 (showOverlay 会 error), 改走 shared pending 链,
+            // 由壳的 DeepLinkImportHost 弹同一个导入对话框; handleResolved 的 src 与
+            // overlay 路径传的是同一字符串、同一 Import*ViewModelShared 入口, 行为等价
+            LegadoDeepLinkHandler.handleResolved(DeepLinkImportRequest(type, source))
+            removeSelf()
             return
         }
-        when (uri.path) {
-            "/bookSource", "/rssSource" -> showImportDialog(ImportBookSourceDialog(url, isShell))
-            "/replaceRule" -> showImportDialog(ImportReplaceRuleDialog(url, isShell))
-            "/textTocRule" -> showImportDialog(ImportTxtTocRuleDialog(url, isShell))
-            "/httpTTS" -> showImportDialog(ImportHttpTtsDialog(url, isShell))
-            "/dictRule" -> showImportDialog(ImportDictRuleDialog(url, isShell))
-            "/theme" -> showImportDialog(ImportThemeDialog(url, isShell))
-            "/addToBookshelf" -> showImportDialog(AddToBookshelfDialog(url, isShell))
-
-            "/readConfig" -> viewModel.getBytes(url) { bytes ->
-                viewModel.importReadConfig(bytes) { title, msg ->
-                    finallyDialog(title, msg)
-                }
-            }
-
-            "/importonline" -> when (uri.host) {
-                "booksource", "rsssource" -> showImportDialog(ImportBookSourceDialog(url, isShell))
-                "replace" -> showImportDialog(ImportReplaceRuleDialog(url, isShell))
-                else -> viewModel.determineType(url) { title, msg ->
-                    finallyDialog(title, msg)
-                }
-            }
-
-            else -> viewModel.determineType(url) { title, msg ->
-                finallyDialog(title, msg)
-            }
-        }
-    }
-
-    private fun handleSuccess(it: Pair<String, String>) {
-        when (it.first) {
-            "bookSource", "rssSource" -> showImportDialog(
-                ImportBookSourceDialog(
-                    it.second,
-                    isShell
-                )
+        AppNavigatorProviders.get().showOverlay(
+            AppOverlay.Dialog(
+                key = "*Import:${type.name}",
+                payload = IntentData.put(source),
             )
-
-            "replaceRule" -> showImportDialog(ImportReplaceRuleDialog(it.second, isShell))
-            "httpTts" -> showImportDialog(ImportHttpTtsDialog(it.second, isShell))
-            "theme" -> showImportDialog(ImportThemeDialog(it.second, isShell))
-            "txtRule" -> showImportDialog(ImportTxtTocRuleDialog(it.second, isShell))
-            "dictRule" -> showImportDialog(ImportDictRuleDialog(it.second, isShell))
-        }
-    }
-
-    private fun showImportDialog(dialog: DialogFragment) {
-        (activity as? AppCompatActivity)?.showDialogFragment(dialog)
+        )
         removeSelf()
-    }
-
-    private fun finallyDialog(title: String, msg: String) {
-        alert(title, msg) {
-            okButton()
-            onDismiss {
-                finishActivity()
-            }
-        }
     }
 
     private fun finishActivity() {
@@ -203,7 +182,7 @@ class FileAssociationFragment() : Fragment() {
         val treeUriStr = AppConfig.defaultBookTreeUri
         if (uri.isContentScheme() && treeUriStr.isNullOrEmpty()) {
             localBookTreeSelect.launch {
-                title = getString(R.string.select_book_folder)
+                title = androidAppString("select_book_folder")
                 mode = HandleFileContract.DIR_SYS
             }
         } else {
@@ -211,6 +190,7 @@ class FileAssociationFragment() : Fragment() {
         }
     }
 
+    @SuppressLint("Recycle") // openOutputStream 由下方 .use 关闭, lint 追踪不到回调内传递的流
     private fun importBook(treeUri: Uri?, uri: Uri) {
         lifecycleScope.launch {
             runCatching {
@@ -257,7 +237,7 @@ class FileAssociationFragment() : Fragment() {
             }.onFailure {
                 if (it is InvalidBooksDirException) {
                     localBookTreeSelect.launch {
-                        title = getString(R.string.select_book_folder)
+                        title = androidAppString("select_book_folder")
                         mode = HandleFileContract.DIR_SYS
                     }
                 } else {

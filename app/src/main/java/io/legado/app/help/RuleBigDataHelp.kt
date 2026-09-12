@@ -1,74 +1,47 @@
 package io.legado.app.help
 
+import io.legado.app.App
 import io.legado.app.utils.FileUtils
-import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.externalFiles
-import splitties.init.appCtx
-import java.io.File
 
-object RuleBigDataHelp {
+/**
+ * [RuleBigDataProvider] app 端实现 (Android 专属)。
+ *
+ * 核心逻辑已下沉 shared commonMain 的 [RuleBigDataShared] (纯文件持久化实现),
+ * 本文件仅保留 Android 专属部分: appCtx.externalFiles/ruleData/book 路径注入,
+ * put/get/has 等全部委托 [RuleBigDataShared], 行为与下沉前完全一致。
+ *
+ * desktop/ios/ohos 端各自注册对应路径的 [RuleBigDataShared] 实例,
+ * 见 RegisterNativeSourceProviders / 各端 ProviderRegistry。
+ */
+object RuleBigDataHelp : RuleBigDataProvider {
 
-    private val ruleDataDir = FileUtils.createFolderIfNotExist(appCtx.externalFiles, "ruleData")
+    private val ruleDataDir =
+        FileUtils.createFolderIfNotExist(App.instance.externalFiles, "ruleData")
     internal val bookData = FileUtils.createFolderIfNotExist(ruleDataDir, "book")
 
-    fun putBookVariable(bookUrl: String, key: String, value: String?) {
-        val md5BookUrl = MD5Utils.md5Encode(bookUrl)
-        val md5Key = MD5Utils.md5Encode(key)
-        if (value == null) {
-            FileUtils.delete(FileUtils.getPath(bookData, md5BookUrl, "$md5Key.txt"), true)
-        } else {
-            val valueFile = FileUtils.createFileIfNotExist(bookData, md5BookUrl, "$md5Key.txt")
-            valueFile.writeText(value)
-            val bookUrlFile = File(FileUtils.getPath(bookData, md5BookUrl, "bookUrl.txt"))
-            if (!bookUrlFile.exists()) {
-                bookUrlFile.writeText(bookUrl)
-            }
-        }
-    }
+    // 注入 appCtx.externalFiles/ruleData/book 路径, 纯逻辑委托 shared commonMain
+    private val shared = RuleBigDataShared(bookData.absolutePath)
 
-    fun getBookVariable(bookUrl: String, key: String?): String? {
-        val md5BookUrl = MD5Utils.md5Encode(bookUrl)
-        val md5Key = MD5Utils.md5Encode(key)
-        val file = File(FileUtils.getPath(bookData, md5BookUrl, "$md5Key.txt"))
-        if (file.exists()) {
-            return file.readText()
-        }
-        return null
-    }
+    override fun putBookVariable(bookUrl: String, key: String, value: String?) =
+        shared.putBookVariable(bookUrl, key, value)
 
-    fun hasBookVariable(bookUrl: String, key: String): Boolean {
-        val md5BookUrl = MD5Utils.md5Encode(bookUrl)
-        val md5Key = MD5Utils.md5Encode(key)
-        val file = File(FileUtils.getPath(bookData, md5BookUrl, "$md5Key.txt"))
-        return file.exists()
-    }
+    override fun getBookVariable(bookUrl: String, key: String?): String? =
+        shared.getBookVariable(bookUrl, key)
 
-    fun putChapterVariable(bookUrl: String, chapterUrl: String, key: String, value: String?) {
-        val md5BookUrl = MD5Utils.md5Encode(bookUrl)
-        val md5ChapterUrl = MD5Utils.md5Encode(chapterUrl)
-        val md5Key = MD5Utils.md5Encode(key)
-        if (value == null) {
-            FileUtils.delete(FileUtils.getPath(bookData, md5BookUrl, md5ChapterUrl, "$md5Key.txt"))
-        } else {
-            val valueFile =
-                FileUtils.createFileIfNotExist(bookData, md5BookUrl, md5ChapterUrl, "$md5Key.txt")
-            valueFile.writeText(value)
-            val bookUrlFile = File(FileUtils.getPath(bookData, md5BookUrl, "bookUrl.txt"))
-            if (!bookUrlFile.exists()) {
-                bookUrlFile.writeText(bookUrl)
-            }
-        }
-    }
+    override fun hasBookVariable(bookUrl: String, key: String): Boolean =
+        shared.hasBookVariable(bookUrl, key)
 
-    fun getChapterVariable(bookUrl: String, chapterUrl: String, key: String): String? {
-        val md5BookUrl = MD5Utils.md5Encode(bookUrl)
-        val md5ChapterUrl = MD5Utils.md5Encode(chapterUrl)
-        val md5Key = MD5Utils.md5Encode(key)
-        val file = File(FileUtils.getPath(bookData, md5BookUrl, md5ChapterUrl, "$md5Key.txt"))
-        if (file.exists()) {
-            return file.readText()
-        }
-        return null
-    }
+    override fun putChapterVariable(bookUrl: String, chapterUrl: String, key: String, value: String?) =
+        shared.putChapterVariable(bookUrl, chapterUrl, key, value)
+
+    override fun getChapterVariable(bookUrl: String, chapterUrl: String, key: String): String? =
+        shared.getChapterVariable(bookUrl, chapterUrl, key)
+
+    override fun listBookDataDirs(): List<String> =
+        shared.listBookDataDirs()
+
+    override fun clearInvalidBookData(bookUrls: Set<String>) =
+        shared.clearInvalidBookData(bookUrls)
 
 }
