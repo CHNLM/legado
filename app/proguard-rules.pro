@@ -44,9 +44,13 @@
 # AnalyzeRuleCore 下沉 commonMain 后无法用 androidx @Keep (无 common 变体), 按类名 keep (JS 反射调用其方法)
 -keep,allowoptimization class io.legado.app.model.analyzeRule.AnalyzeRuleCore { *; }
 
-# Android-KMP library 的 consumer keep rules 发布在 AGP 8.13 尚不可用，
-# 先由最终 app 统一承载 shared/quickjs 的反射与 JNI 保留规则。
--include ../shared/consumer-rules.pro
+# JS 反射 keep 规则随 :shared 删除已按类归属迁至 core/data/foundation 各自
+# consumer-rules.pro（按类归属拆到 core/data/foundation 三者）；AGP KMP
+# library 的 consumer rules 发布行为未验证，沿用旧策略由最终 app 显式 include，
+# 保证 R8 混淆/shrink 下书源 JS 按名反射调用的类保活。
+-include ../core/consumer-rules.pro
+-include ../data/consumer-rules.pro
+-include ../foundation/consumer-rules.pro
 -include ../modules/quickjs/consumer-rules.pro
 -keepclassmembers,allowoptimization class * {
     @androidx.annotation.Keep <methods>;
@@ -57,7 +61,11 @@
 ############################
 # 业务：JS 引擎调用的 Java 类
 ############################
--keep class * extends io.legado.app.help.JsExtensionsJvm { *; }
+# 书源 JS 面实现类 (BookSource/HttpTTS/AnalyzeRuleCore/AnalyzeUrlCore/RssJsExtensionsJvm 等):
+# JS 桥经 JavaObjectBridge 按方法名反射调用 (collectMethods 走 clazz.methods, 含接口默认实现
+# 桥方法), 不 keep 时未被 Kotlin 直接调用的成员会被当死代码删除。
+# 注: JS 侧拿到的是运行时实例 (evalJS 绑 this), 类本身由 Kotlin 构造点可达, 故只需保成员。
+-keep class * implements io.legado.app.help.JsExtensionsCommon { *; }
 
 ############################
 # 业务：数据实体（Gson 反射 + Room + JS 访问）
@@ -85,9 +93,6 @@
     cn.hutool.core.util.** { *; }
 -keep class cn.hutool.crypto.** { *; }
 -dontwarn cn.hutool.**
-# rhino compileOnly 不进产物,适配层残留引用仅警告豁免
--dontwarn org.mozilla.javascript.**
--dontwarn com.script.*
 
 ############################
 # OkHttp（保留给 js 调用）

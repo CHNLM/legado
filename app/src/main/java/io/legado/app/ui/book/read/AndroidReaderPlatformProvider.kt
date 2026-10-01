@@ -18,7 +18,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -30,6 +29,10 @@ import io.legado.app.constant.AppConst
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.Bookmark
+import io.legado.app.data.entities.localDateNow
+import io.legado.app.data.entities.localDateOf
+import io.legado.app.data.entities.localDateParseOrNull
+import io.legado.app.data.entities.toYearMonthDay
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
@@ -55,6 +58,7 @@ import io.legado.app.ui.compose.component.AppSwitch
 import io.legado.app.ui.compose.dialogs.alert
 import io.legado.app.ui.compose.dialogs.selector
 import io.legado.app.ui.compose.theme.AppTheme
+import io.legado.app.ui.compose.theme.AppTheme.DesignTokens
 import io.legado.app.ui.main.MainActivity
 import io.legado.app.ui.reader.ReaderTextActionMenu
 import io.legado.app.ui.reader.ReaderTextActions
@@ -73,8 +77,6 @@ import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 
 class AndroidReaderPlatformProvider(
     private val activity: MainActivity,
@@ -245,7 +247,7 @@ class AndroidReaderPlatformProvider(
         batteryReceiver = receiver
         // 注册生命周期观察者: 退后台停自动翻页 + 自动备份 (对照原版 onPause 的
         // autoPageStop / Backup.autoBack)。计时/落库/取消预下载改由 shared
-        // RouteActiveEffect 统一驱动 (AppForegroundState + 栈顶判定), 此处不再转发
+        // 本页 Lifecycle 统一驱动 (OnRouteLifecycle), 此处不再转发
         val observer = object : DefaultLifecycleObserver {
             override fun onPause(owner: LifecycleOwner) {
                 activeMenuState?.second?.stopAutoPage()
@@ -747,23 +749,22 @@ private class AndroidReaderMenuState(
     /** 模拟阅读配置弹窗 (对照原版 BaseReadBookActivity.showSimulatedReading) */
     private fun showSimulatedReading() {
         val book = screenModel.viewModel.book.value ?: return
-        val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
         val enabledState = mutableStateOf(book.config.readSimulating)
         val startState = mutableStateOf(book.getStartChapter().toString())
         val numState = mutableStateOf(book.config.dailyChapters.toString())
-        val dateState = mutableStateOf(book.getStartDate()?.format(dateFormatter).orEmpty())
+        val dateState = mutableStateOf(book.getStartDate()?.toString().orEmpty())
         activity.alert(androidAppString("simulated_reading")) {
             customView {
                 val colors = AppTheme.colors
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(16.dp)
+                        .padding(DesignTokens.spacingLg)
                 ) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = DesignTokens.spacingDefault),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
@@ -780,14 +781,14 @@ private class AndroidReaderMenuState(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = DesignTokens.spacingDefault),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
                             androidAppString("start_from"),
                             color = colors.primaryText,
                             fontSize = 16.sp,
-                            modifier = Modifier.padding(end = 8.dp),
+                            modifier = Modifier.padding(end = DesignTokens.spacingDefault),
                         )
                         Text(
                             text = dateState.value.ifEmpty { "Select date" },
@@ -797,27 +798,27 @@ private class AndroidReaderMenuState(
                             modifier = Modifier
                                 .weight(1f)
                                 .clickable {
-                                    val localStartDate = runCatching {
-                                        LocalDate.parse(dateState.value)
-                                    }.getOrDefault(LocalDate.now())
+                                    val localStartDate = localDateParseOrNull(dateState.value)
+                                        ?: localDateNow()
+                                    val (ly, lm, ld) = localStartDate.toYearMonthDay()
                                     DatePickerDialog(
                                         activity,
                                         { _, yy, mm, dayOfMonth ->
-                                            dateState.value = LocalDate.of(yy, mm + 1, dayOfMonth)
-                                                .format(dateFormatter)
+                                            dateState.value =
+                                                localDateOf(yy, mm + 1, dayOfMonth).toString()
                                         },
-                                        localStartDate.year,
-                                        localStartDate.monthValue - 1,
-                                        localStartDate.dayOfMonth,
+                                        ly,
+                                        lm - 1,
+                                        ld,
                                     ).show()
                                 }
-                                .padding(vertical = 8.dp),
+                                .padding(vertical = DesignTokens.spacingDefault),
                         )
                     }
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = DesignTokens.spacingDefault),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
@@ -830,7 +831,7 @@ private class AndroidReaderMenuState(
                             onValueChange = { startState.value = it },
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(horizontal = 4.dp),
+                                .padding(horizontal = DesignTokens.spacingXs),
                         )
                         Text(
                             androidAppString("daily_chapters"),
@@ -842,17 +843,15 @@ private class AndroidReaderMenuState(
                             onValueChange = { numState.value = it },
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(start = 4.dp),
+                                .padding(start = DesignTokens.spacingXs),
                         )
                     }
                 }
             }
             okButton {
-                val date = dateState.value.let {
-                    if (it.isEmpty()) LocalDate.now()
-                    else LocalDate.parse(it, dateFormatter)
-                }
-                book.config.startDate = date
+                // 日期来自 DatePicker, 只会是 formatDate 产物或空 (空=今天)
+                book.config.startDate =
+                    localDateParseOrNull(dateState.value) ?: localDateNow()
                 book.config.dailyChapters = numState.value.intOr(book.totalChapterNum)
                 book.config.startChapter = startState.value.intOr(0)
                 book.config.readSimulating = enabledState.value
@@ -1031,19 +1030,19 @@ private class AndroidReaderMenuState(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(16.dp)
+                        .padding(DesignTokens.spacingLg)
                 ) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = DesignTokens.spacingDefault),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
                             androidAppString("start"),
                             color = colors.primaryText,
                             fontSize = 16.sp,
-                            modifier = Modifier.padding(end = 8.dp),
+                            modifier = Modifier.padding(end = DesignTokens.spacingDefault),
                         )
                         AppNumberField(
                             value = startState.value,
@@ -1054,7 +1053,7 @@ private class AndroidReaderMenuState(
                             androidAppString("end"),
                             color = colors.primaryText,
                             fontSize = 16.sp,
-                            modifier = Modifier.padding(horizontal = 8.dp),
+                            modifier = Modifier.padding(horizontal = DesignTokens.spacingDefault),
                         )
                         AppNumberField(
                             value = endState.value,
@@ -1087,7 +1086,7 @@ private class AndroidReaderMenuState(
                     values = AppConst.charsets,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(DesignTokens.spacingLg),
                 )
             }
             okButton {
@@ -1100,3 +1099,4 @@ private class AndroidReaderMenuState(
         }
     }
 }
+

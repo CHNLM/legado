@@ -9,6 +9,7 @@ import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.os.Build
+import kotlinx.coroutines.runBlocking
 import io.legado.app.base.AppContextWrapper
 import io.legado.app.constant.AppConst.channelIdDownload
 import io.legado.app.constant.AppConst.channelIdReadAloud
@@ -16,6 +17,8 @@ import io.legado.app.constant.AppConst.channelIdWeb
 import io.legado.app.constant.PreferKey
 import io.legado.app.constant.registerAndroidAppLogHost
 import io.legado.app.data.appDb
+import io.legado.app.model.ImageErrorBytesProviders
+import legado.ui.generated.resources.Res
 import io.legado.app.help.AppFreezeMonitor
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.CrashHandler
@@ -31,11 +34,11 @@ import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.BookImageStorageProviders
 import io.legado.app.help.book.BookStorageProviders
 import io.legado.app.help.book.LocalBookLocators
-import io.legado.app.help.config.AndroidReadConfigProviders
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ReadBookConfigProviders
+import io.legado.app.help.config.ReadBookConfigShared
 import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.config.ThemeConfig.applyDayNight
 import io.legado.app.help.config.ThemeConfig.applyDayNightInit
@@ -53,7 +56,6 @@ import io.legado.app.help.http.registerAndroidCookieStoreProvider
 import io.legado.app.help.http.registerAndroidCronetProvider
 import io.legado.app.help.http.registerSharedCookieJarBridge
 import io.legado.app.help.i18n.androidAppString
-import io.legado.app.help.i18n.registerAndroidAppStringProvider
 import io.legado.app.help.i18n.warmAppStringCache
 import io.legado.app.help.image.registerAndroidBookImageLoader
 import io.legado.app.help.registerAndroidDirectLinkUploadProviders
@@ -67,9 +69,10 @@ import io.legado.app.help.storage.registerAndroidPasswordProvider
 import io.legado.app.help.toast.registerAndroidToaster
 import io.legado.app.help.tts.registerAndroidSystemTtsEngine
 import io.legado.app.help.ui.registerAndroidOpenUrlProvider
+import io.legado.app.help.config.PreferenceProviders
 import io.legado.app.help.ui.registerAndroidUserAgentProvider
 import io.legado.app.help.update.registerAndroidAppUpdate
-import io.legado.app.model.BookCover
+import io.legado.app.model.BookCoverShared
 import io.legado.app.model.CacheBook
 import io.legado.app.model.fileBook.registerAndroidFileBookProviders
 import io.legado.app.model.fileBook.registerEpubApplicationContext
@@ -84,6 +87,7 @@ import io.legado.app.service.WebService
 import io.legado.app.ui.book.changesource.registerAndroidChangeBookSourcePlatform
 import io.legado.app.ui.book.manage.registerAndroidBookshelfManagePlatform
 import io.legado.app.ui.browser.configureWebViewStartUpMode
+import io.legado.app.ui.compose.platform.registerComposeStringProviders
 import io.legado.app.ui.main.AndroidUpdateBookCallback
 import io.legado.app.ui.platform.registerSharedAppContext
 import io.legado.app.utils.LogUtils
@@ -93,8 +97,8 @@ import io.legado.app.utils.registerAndroidRegexErrorHandler
 import io.legado.app.utils.registerAndroidScreenInfoProvider
 import io.legado.app.utils.removePref
 import io.legado.app.web.registerAndroidWebServerPlatform
-import io.legado.app.web.utils.registerAndroidWebAssetSource
 import io.legado.app.web.utils.registerAndroidWebStrings
+import io.legado.app.web.utils.registerComposeWebAssetSource
 import kotlinx.coroutines.launch
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -125,6 +129,10 @@ class App : Application() {
         registerAndroidDebugState(this)
         // 注册 shared 模块的 ApplicationContext, 供 commonMain 的 stringRes(resId) 使用
         registerSharedAppContext(this)
+        // 注册图片加载失败兜底图字节 (image_loading_error.png 单点持于 :ui composeResources)
+        ImageErrorBytesProviders.register {
+            runBlocking { Res.readBytes("drawable/image_loading_error.png") }
+        }
         // 注册 commonMain 的 Toasters actual (AndroidToaster), 供下沉业务调用 Toasters.get().toast()
         registerAndroidToaster(this)
         // 注册 EpubFile androidMain 的 ApplicationContext, 供 LocalEpubResource android actual
@@ -141,7 +149,7 @@ class App : Application() {
         // 非正确性前提); 须在 Locale.setDefault 之后 — attachBaseContext 的
         // AppContextWrapper.wrap 已设置
         warmAppStringCache()
-        registerAndroidAppStringProvider()
+        registerComposeStringProviders()
         registerAndroidAppLogHost()
         // 注册 ScreenInfoProvider (供 SystemUtils.screenWidthPx/screenHeightPx 委托读取),
         // 须在任何 SystemUtils 屏幕尺寸访问之前 (PdfFile 渲染等)
@@ -216,7 +224,7 @@ class App : Application() {
         // - WebStrings: cannot_empty 文案注入 WebSocketServer
         // 须在任何 WebServerManager.start()/stop() 之前注册 (用户触发 Web 服务开关时)
         registerAndroidWebServerPlatform { WebService.serve() }
-        registerAndroidWebAssetSource(instance)
+        registerComposeWebAssetSource()
         registerAndroidWebStrings(androidAppString("cannot_empty"))
         // 注册 AudioPlay 平台 provider (commonMain AudioPlayShared 调用
         // AudioPlayCommanders 派发 Service 命令,
@@ -248,10 +256,10 @@ class App : Application() {
         // 注册备份/恢复的 Android 钩子 (SAF 复制解压 / config.xml 旧格式 / 主题与图标刷新)
         registerAndroidBackupRestoreHook()
         // 注册 ReadBookConfigProviders: app 端 ReadBookConfig 已收敛为薄壳, 全部转发到这里
-        // 注册的 ReadBookConfigShared 实例 (shared UI / BackupShared 也共用同一实例)。
+        // 注册的 ReadBookConfigShared 实例 (shared UI / BackupShared / ReadConfigProviders() 也共用同一实例)。
         // 须在 registerAndroidAppFilesDir + registerAndroidWebBookProviders(AppConfigProviders) 之后。
         ReadBookConfigProviders.register(
-            AndroidReadConfigProviders().readBookConfig
+            ReadBookConfigShared(PreferenceProviders.get())
         )
         CrashHandler(this)
         oldConfig = Configuration(resources.configuration)
@@ -290,8 +298,11 @@ class App : Application() {
             URL.setURLStreamHandlerFactory(ObsoleteUrlFactory(okHttpClient))
             launch { installGmsTlsProvider(instance) }
             initQuickJs()
-            //初始化封面
-            BookCover.toString()
+            // 预热封面图集 (配置了自定义默认封面时, 提前在后台反序列化填热记忆化缓存)
+            BookCoverShared.currentDefaultCovers(
+                PreferenceProviders.get(),
+                AppConfig.isNightTheme
+            )
         }
         Coroutine.async {
             if (LocalConfig.lastBackup + TimeUnit.DAYS.toMillis(1) < System.currentTimeMillis()) {
@@ -410,7 +421,11 @@ class App : Application() {
     }
 
     private fun initQuickJs() {
-        // 触发当前 JS 引擎单例初始化,预加载 bootstrap (quickjs 预编译 bytecode / rhino 加载类)
-        JsEngines.get()
+        // 触发 JS 引擎初始化, 提前加载 native 动态库并预编译 bootstrap bytecode
+        runCatching {
+            JsEngines.get().createStandaloneScope().close()
+        }.onFailure {
+            LogUtils.d("App", "initQuickJs prewarm failed: ${it.message}")
+        }
     }
 }

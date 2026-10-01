@@ -42,19 +42,21 @@
 }
 
 ############################
-# 项目反射 keep (危险区, 随 shared/quickjs 下沉的规则照搬)
+# 项目反射 keep (危险区, 随业务层下沉的规则照搬)
 ############################
--include ../shared/consumer-rules.pro
+-include ../core/consumer-rules.pro
+-include ../data/consumer-rules.pro
+-include ../foundation/consumer-rules.pro
 -include ../modules/quickjs/consumer-rules.pro
 
 # AnalyzeRuleCore 下沉 commonMain 后无法用 androidx @Keep (无 common 变体), 按类名 keep (JS 反射调用其方法)
 -keep,allowoptimization class io.legado.app.model.analyzeRule.AnalyzeRuleCore { *; }
 
-# 书源 JS 面实现 (DesktopAnalyzeRule/DesktopAnalyzeUrl/DesktopBookSourceJsExt/HttpTTSJsExt 等,
-# 均 implements JsExtensionsJvm; extends 在 ProGuard 中同样匹配接口实现类)
--keep class * extends io.legado.app.help.JsExtensionsJvm { *; }
+# 书源 JS 面实现类 (BookSource/HttpTTS/AnalyzeRuleCore/AnalyzeUrlCore/RssJsExtensionsJvm 等):
+# JS 桥经 JavaObjectBridge 按方法名反射调用, 不 keep 时未被 Kotlin 直接调用的成员会被当死代码删除。
+-keep class * implements io.legado.app.help.JsExtensionsCommon { *; }
 
-# 数据实体 (Gson 反射 + Room + JS 访问; shared/consumer-rules.pro 已覆盖
+# 数据实体 (Gson 反射 + Room + JS 访问; data/consumer-rules.pro 已覆盖
 # io.legado.app.data.entities.**, 此处兜底其它包的实体)
 -keep class **.data.entities.** { *; }
 -keep class io.legado.app.model.fileBook.ZipEntry { *; }
@@ -104,9 +106,26 @@
 -keep class **.*_Impl { *; }
 
 ############################
-# JNI native 方法 (quickjs 桥 System.load 加载 native 库)
+# JNI native 方法 (quickjs 桥 / androidx sqlite-bundled 的 sqliteJni.dll 等:
+# 这些 native 库在 JNI_OnLoad 里用 RegisterNatives 按「类名+方法名+签名」批量绑定方法表)
 ############################
--keepclasseswithmembernames class * { native <methods>; }
+# 指令选型必须看清语义: -keepclasseswithmembernames 等价 keepclasseswithmembers,allowshrinking,
+# 只保证「名字不被改」, 仍然允许把方法整个删掉。3.26.09121949 正式版实测踩坑:
+# 旧写法下 ProGuard 把 sqlite-bundled 里 Java 侧没有直接调用点的 nativeThreadSafeMode /
+# nativeBindBlob / nativeBindDouble / nativeGetBlob / nativeGetDouble 当死代码删除,
+# 而 jar 内 sqliteJni.dll 仍按 21 个方法注册 → System.load 抛
+# NoSuchMethodError → BundledSQLiteDriver$NativeLibraryObject 静态初始化失败 →
+# 桌面端数据库整体不可用 → 书架 LaunchedEffect 未捕获异常打停 Recomposer → 界面定格、键鼠失灵。
+# 本项目本就 -dontobfuscate (改名风险为零), 所以旧写法连它唯一的好处都不提供, 只有副作用。
+# 必须用 -keepclasseswithmembers (不带 names 后缀) 才是「不许删」。
+# 对照实验 (2026-09-14, 用构建同版本 ProGuard 7.9.1 + 原始 sqlite-bundled jar + 一个只调
+# BundledSQLiteDriver.open() 的合成种子作入口, 模拟 Room 的真实可达面):
+#   本条旧写法 → BundledSQLiteDriverKt 的 native 从 2 个被删到 1 个, 产物跑 System.load
+#     报 NoSuchMethodError: ...nativeThreadSafeMode()I not found (与正式崩溃日志一致)
+#   改成下方写法 → 2 个全在, System.load 通过
+# 被删的根因链: 未使用的 public BundledSQLiteDriver.getThreadingMode() → 唯一调用
+# access$nativeThreadSafeMode() 的地方 → 连带它下面的 external fun 一起被当死代码删除。
+-keepclasseswithmembers class * { native <methods>; }
 
 ############################
 # Hutool (书源 JS 直调 cn.hutool.crypto.SecureUtil/AES/SymmetricCrypto 等, 按名反射;
@@ -122,9 +141,6 @@
     cn.hutool.core.util.** { *; }
 -keep class cn.hutool.crypto.** { *; }
 -dontwarn cn.hutool.**
-# rhino compileOnly 不进产物,适配层残留引用仅警告豁免
--dontwarn org.mozilla.javascript.**
--dontwarn com.script.*
 
 ############################
 # OkHttp (保留给 js 调用)

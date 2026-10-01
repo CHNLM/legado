@@ -223,6 +223,10 @@ internal object DesktopTaskbarDwm {
             DesktopWindowChromeNative.removeMessageHandler(messageHandler)
             hooked = false
         }
+        // 渲染/封面执行器随托盘一起结束 (uninstall 只在应用退出路径调用, 窗口重建路径当前不可达):
+        // 留着会在进程收尾期间继续跑投递进来的绘制/取图任务
+        renderExecutor.shutdown()
+        coverExecutor.shutdown()
     }
 
     /** 会话终结时清空卡片内容 (封面/文案/进度与加载去重状态), 下次会话从干净状态开始。 */
@@ -362,10 +366,15 @@ internal object DesktopTaskbarDwm {
         when (msg) {
             WM_DWMSENDICONICTHUMBNAIL -> {
                 if (!iconicEnabled) return false
-                val w = ((lparam ushr 16) and 0xFFFF).toInt()
-                val h = (lparam and 0xFFFF).toInt()
-                if (w <= 0 || h <= 0) return false
-                enqueueRender(live = false, thumbnailSize = w to h)
+                // lParam: HIWORD = 最大 x, LOWORD = 最大 y (MSDN WM_DWMSENDICONICTHUMBNAIL)。
+                // 这是 DWM 声明能接受的上限, 超过即被拒 (本机实测: 报 250x133 时交 250x133 得
+                // S_OK, 交 260x138 即 E_INVALIDARG)。
+                // 官方示例 (DwmSetIconicThumbnail "Examples") 直接 CreateDIB(HIWORD(lParam),
+                // LOWORD(lParam)) 照尺寸建图, 既不被拒也不经任何缩放。
+                val reqW = ((lparam ushr 16) and 0xFFFF).toInt()
+                val reqH = (lparam and 0xFFFF).toInt()
+                if (reqW <= 0 || reqH <= 0) return false
+                enqueueRender(live = false, thumbnailSize = reqW to reqH)
                 return true
             }
 
@@ -422,7 +431,7 @@ internal object DesktopTaskbarDwm {
         if (live) {
             renderAndSubmitLivePreview(hwnd, generation)
         } else {
-            val (w, h) = thumbnailSize ?: (200 to 120)
+            val (w, h) = thumbnailSize ?: error("缩略图渲染缺少 DWM 请求尺寸")
             val snapshot = currentSnapshot.get()
             val theme = currentTheme.get()
             val thumb = renderThumbnailCard(w, h, snapshot, theme)

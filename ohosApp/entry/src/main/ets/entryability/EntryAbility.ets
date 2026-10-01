@@ -3,6 +3,7 @@ import type AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import type Want from '@ohos.app.ability.Want';
 import type { Configuration } from '@ohos.app.ability.Configuration';
 import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
+import { bundleManager } from '@kit.AbilityKit';
 import type window from '@ohos.window';
 import display from '@ohos.display';
 import notificationManager from '@ohos.notificationManager';
@@ -18,7 +19,7 @@ import { initTtsBridge, handleTtsCommand } from '../bridge/TtsBridgeHandler';
 import { handleCryptoRequest } from '../bridge/CryptoBridgeHandler';
 import { handleHttpRequest } from '../bridge/HttpBridgeHandler';
 import { initFilePickerBridge, handleFilePickerRequest } from '../bridge/FilePickerBridgeHandler';
-import { handlePasteboardRequest } from '../bridge/PasteboardBridgeHandler';
+import { initPasteboardBridge, handlePasteboardRequest } from '../bridge/PasteboardBridgeHandler';
 import { handleNetworkRequest } from '../bridge/NetworkBridgeHandler';
 import { handleTextCodecRequest } from '../bridge/TextCodecBridgeHandler';
 // 后台 WebView 桥接处理器 (隐藏 Web 组件 + runJavaScript 取源码, 书源 webView 规则)
@@ -50,6 +51,31 @@ interface WindowCommand {
   action: string;  // 'setFullScreenLayout' | 'setKeepScreenOn' | 'setPreferredOrientation' | 'setSystemBarEnable'
   enabled?: boolean;
   orientation?: number;
+}
+
+// ===== 外部启动请求投递串约定 (与 ui/src/ohosMain OhosLaunchRequests 常量逐字对齐) =====
+// 只传一个字符串的 napi 导出 (legado_handle_launch_request) 无法携带整个 Want, 故把 Want.type
+// 拼成 `mime:<type>|<uri>` 前缀形式 (同 `route:` 一样的既有约定), 由 Kotlin 侧解回。
+// 改这三处字面量必须同步改 OhosLaunchRequests, 否则外部投递会静默变成 DeepLink。
+const LAUNCH_ROUTE_PREFIX: string = 'route:';
+const LAUNCH_MIME_PREFIX: string = 'mime:';
+const LAUNCH_MIME_SEPARATOR: string = '|';
+
+/**
+ * 把 Want.type 拼成 `mime:<type>|<uri>` 投递串 (不带或形态不对时原样返回 uri)。
+ *
+ * 只对形如 `<top>/<sub>` 的 MIME 生效; 已带 `route:` / `mime:` 前缀的串不重复拼
+ * (拼了就破了 Kotlin OhosLaunchRequests 的前缀约定)。
+ */
+function withMimeTypeHint(uri: string, type: string): string {
+  const mime: string = type.trim().toLowerCase();
+  if (mime.length === 0 || !mime.includes('/') || mime.includes('|')) {
+    return uri;
+  }
+  if (uri.startsWith(LAUNCH_ROUTE_PREFIX) || uri.startsWith(LAUNCH_MIME_PREFIX)) {
+    return uri;
+  }
+  return LAUNCH_MIME_PREFIX + mime + LAUNCH_MIME_SEPARATOR + uri;
 }
 
 /**
@@ -109,6 +135,17 @@ export default class EntryAbility extends UIAbility {
       console.info('[Legado] ohos sandbox dirs injected: filesDir=' + this.context.filesDir);
     } catch (e) {
       console.error('[Legado] registerFileDir/CacheDir failed: ' + JSON.stringify(e));
+    }
+
+    // 注入应用版本名 (供关于页显示与复制)。版本号写在 app.json5, 且由 hvigorfile.ts 在构建阶段
+    // 覆写为 "3.yy.MMddHH", 只有运行期读应用包信息才能拿到真实值 (静态文件里是占位值)。
+    // getBundleInfoForSelfSync 取自身 BundleInfo, versionName 即 app.json5 的 versionName 字段。
+    try {
+      const bundleInfo = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      legado.registerAppVersion(bundleInfo.versionName);
+      console.info('[Legado] app version injected: ' + bundleInfo.versionName);
+    } catch (e) {
+      console.error('[Legado] registerAppVersion failed: ' + JSON.stringify(e));
     }
 
     // KP8+: 初始化 System 桥接处理器 (注入 UIAbilityContext 供 handleOpenUrl 调 startAbility)。
@@ -230,6 +267,7 @@ export default class EntryAbility extends UIAbility {
     // 读写纯文本, 完成后调 legado.pasteboardCallback(requestId, resultJson) 回送结果
     // 唤醒 KMP 侧 CompletableDeferred。未注册时 KMP 侧降级 println / 返回 null。
     registerSafely((): void => {
+      initPasteboardBridge(this.context);
       legado.registerPasteboardCallback((json: string): void => {
         handlePasteboardRequest(json, (requestId: number, resultJson: string): void => {
           legado.pasteboardCallback(requestId, resultJson);
@@ -379,8 +417,8 @@ export default class EntryAbility extends UIAbility {
     }, '[Legado] share tsfn callback registered via napi', '[Legado] registerShareCallback failed: ');
 
     // Keyboard tsfn 回调注册 (KMP → ArkTS 跨线程 dispatch, 软键盘显隐/避让, 同 Window 模式 fire-and-forget)
-    // KMP OhosPlatformServices.keyboard.hideSoftInput/showSoftInput/setSoftInputPolicy
-    // → OhosNativeBridge.hideSoftInput/showSoftInput/setKeyboardAvoidMode 经 tsfn dispatch 到此回调,
+    // KMP OhosPlatformServices.keyboard.hideSoftInput/setSoftInputPolicy
+    // → OhosNativeBridge.hideSoftInput/setKeyboardAvoidMode 经 tsfn dispatch 到此回调,
     // ArkTS 侧 KeyboardBridgeHandler 调 @ohos.inputMethod / UIContext。
     // 未注册时 KMP 侧降级 println。
     registerSafely((): void => {
@@ -426,6 +464,14 @@ export default class EntryAbility extends UIAbility {
    * - 其余非空 URI (文件关联 file:// / 其他 scheme deep link / 通知 route:xxx) →
    *   legado.handleLaunchRequest (@CName legado_handle_launch_request → OhosLaunchRequests
    *   → LaunchRequestBus → Compose LegadoApp 路由导航)。普通启动 want.uri 为空, 跳过。
+   *
+   * # want.type (MIME) 为何要拼进同一串
+   * 系统把视频投给本 Ability 时, 光有 want.uri 不够: 媒体库地址形如
+   * `file://media/Video/<fileId>`, 末段没有扩展名, KMP 侧 VideoDirect 的扩展名嗅探判不出
+   * 视频 (只有 want.type = video/mp4 能认)。napi 导出签名只能传一个字符串, 改签名要同步
+   * 重生成 liblegado_shared_api.h (构建产物, 不得手改), 所以按 Kotlin OhosLaunchRequests
+   * 的既定约定把 MIME 前缀拼到同一串: `mime:<type>|<uri>` (与已有的 `route:` 前缀同一路数)。
+   * 不带 MIME 的普通启动串依旧原样透传, 旧链路行为零变化。
    */
   private handleDeepLink(want: Want): void {
     const uri: string = want.uri ?? '';
@@ -442,8 +488,9 @@ export default class EntryAbility extends UIAbility {
       return;
     }
     // 文件关联 / 其他 scheme deep link / 通知 route: 投递给 LaunchRequestBus (Compose 侧消费路由)
+    const request: string = withMimeTypeHint(uri, want.type ?? '');
     try {
-      const handled: boolean = legado.handleLaunchRequest(uri);
+      const handled: boolean = legado.handleLaunchRequest(request);
       console.info('[Legado] launch request dispatched: handled=' + handled + ', uri=' + uri);
     } catch (e) {
       console.error('[Legado] handleLaunchRequest failed: ' + JSON.stringify(e) + ', uri=' + uri);

@@ -172,11 +172,14 @@ android {
     // 共存版 _releaseA 后缀 + 分目录输出, 避免两次构建互相覆盖)。
 
     ksp {
-        arg("jsapi.extraClasses", "io.legado.app.data.entities.BaseSource,io.legado.app.help.CacheManager")
+        arg(
+            "jsapi.extraClasses",
+            "io.legado.app.data.entities.BaseSource,io.legado.app.data.entities.BookSource," +
+                "io.legado.app.data.entities.HttpTTS,io.legado.app.help.CacheManager"
+        )
     }
 
     compileOptions {
-        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
@@ -196,7 +199,7 @@ android {
         resources.excludes.add("DebugProbesKt.bin")
         resources.excludes.add("kotlin-tooling-metadata.json")
         resources.excludes.add("play-services-*.properties")
-        // LICENSE/disclaimer/privacyPolicy.md 已移到 shared composeResources files/md
+        // LICENSE/disclaimer/privacyPolicy.md 在 :ui composeResources files/md
         // (四端共享一份, 经 WebAssetSources 读: Android assets / 桌面 classpath /
         // iOS 鸿蒙 Res.readBytes), 不再走 java resources, 故此处无需保留豁免
         jniLibs.excludes.add("lib/*/libcronet*.so")
@@ -220,28 +223,34 @@ android {
 
 // APK 语言目录过滤: APK 只打包 values/ (英文默认) + values-zh/ (简中) +
 // values-zh-rHK/values-zh-rTW (繁体), 排除 4 个小语种目录 (values-es-rES/values-ja-rJP/
-// values-pt-rBR/values-vi)。用户决策小语种暂缓打包; 资源文件本体保留在 shared 全量
+// values-pt-rBR/values-vi)。用户决策小语种暂缓打包; 资源文件本体保留在 :ui 全量
 // (desktop/iOS 资源生成不受影响)。androidResources.localeFilters 只作用于 AAPT 合并的
 // res/ 资源, 管不到 composeResources (它作为 assets 走 merge{Variant}Assets)。
-// 机制: shared 的 copy*ComposeResourcesToAndroidAssets 只把 composeResources 复制进
-// shared AAR, 全量合并发生在本模块的 merge{Variant}Assets (把 AAR 资产复制进合并输出)。
-// shared 侧删除会被 merge 覆盖, 故挂在此处 doLast: merge 完成后删除合并输出下的 4 个
+// 机制: :ui 的 copy*ComposeResourcesToAndroidAssets 只把 composeResources 复制进
+// :ui AAR, 全量合并发生在本模块的 merge{Variant}Assets (把 AAR 资产复制进合并输出)。
+// :ui 侧删除会被 merge 覆盖, 故挂在此处 doLast: merge 完成后删除合并输出下的 4 个
 // 小语种子目录, 删除先于 package{Variant} 打包 (package 任务消费 merge 输出)。
 // 输出目录用 outputs.files 取, 不硬编码路径。
-val excludedComposeLocales = listOf(
-    "values-es-rES",
-    "values-ja-rJP",
-    "values-pt-rBR",
-    "values-vi",
-)
+// 配置缓存约束: doLast 内不得引用脚本级对象或 Task.project —— 待删列表就地声明,
+// 删除用 File.deleteRecursively 而非 project.delete。
 tasks.matching {
     it.name == "mergeAppDebugAssets" || it.name == "mergeAppReleaseAssets"
 }.configureEach {
     doLast {
+        val excludedLocales = listOf(
+            "values-es-rES",
+            "values-ja-rJP",
+            "values-pt-rBR",
+            "values-vi",
+        )
         outputs.files.forEach { output ->
-            val resourcesRoot = output.resolve("composeResources/legado.shared.generated.resources")
-            excludedComposeLocales.forEach { locale ->
-                project.delete(resourcesRoot.resolve(locale))
+            // 目录名由 compose 资源插件按模块名生成, 不硬编码; 扫描 composeResources 下所有
+            // 插件产物目录逐个清理, 模块切分/改名后无需同步本处
+            val composeResourcesRoot = output.resolve("composeResources")
+            composeResourcesRoot.listFiles().orEmpty().forEach { resourcesRoot ->
+                excludedLocales.forEach { locale ->
+                    resourcesRoot.resolve(locale).deleteRecursively()
+                }
             }
         }
     }
@@ -265,7 +274,6 @@ androidComponents {
 }
 
 dependencies {
-    coreLibraryDesugaring(libs.desugar)
     testImplementation(libs.junit)
     androidTestImplementation(libs.bundles.androidTest)
 
@@ -302,6 +310,10 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.exoplayer.hls)
+    // DASH (.mpd) 解码模块: 缺它则书源给的 .mpd 直链必失败 (MIME 已设 APPLICATION_MPD,
+    // 但 DefaultMediaSourceFactory 反射加载 DashMediaSource$Factory 抛 ClassNotFoundException)。
+    // 仅 Android 内部受益; 跨端对外声明 AppPattern.videoFileRegex 仍不含 mpd (iOS AVPlayer 不支持 DASH)。
+    implementation(libs.androidx.media3.exoplayer.dash)
     implementation(libs.media3.datasource.okhttp)
 
     implementation(libs.room.runtime)
@@ -309,7 +321,7 @@ dependencies {
 
     implementation(libs.ksoup)
     implementation(libs.kotlinx.serialization.json)
-    implementation(project(":shared"))
+    implementation(project(":ui"))
     implementation(project(":modules:quickjs"))
     ksp(project(":modules:quickjs-processor"))
 

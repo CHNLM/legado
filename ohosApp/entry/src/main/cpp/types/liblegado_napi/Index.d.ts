@@ -105,6 +105,18 @@ export interface LegadoNativeBridge {
    */
   registerCacheDir(path: string): void;
 
+  // ===== 应用版本名注入 (ArkTS → Kotlin 同步推送, 同 FileDir 模式) =====
+  /**
+   * 注入应用版本名 (EntryAbility.onCreate 调用)。
+   *
+   * 版本号写在 app.json5 且由 hvigorfile.ts 在构建阶段覆写为 "3.yy.MMddHH", 只有运行期读
+   * 应用包信息才能拿到真实值; Kotlin/Native 无读取应用包信息的 API, 故由 ArkTS 读
+   * bundleManager.getBundleInfoForSelfSync().versionName 后注入, 供关于页显示/复制。
+   *
+   * @param versionName 应用版本名, 如 '3.26.092614'
+   */
+  registerAppVersion(versionName: string): void;
+
   // ===== 屏幕尺寸注入 (ArkTS → Kotlin 同步推送, 同 FileDir 模式) =====
   /**
    * 注入显示物理像素尺寸 (EntryAbility.onWindowStageCreate 中 loadContent 之前调用)。
@@ -625,15 +637,15 @@ export interface LegadoNativeBridge {
   // ===== Keyboard tsfn 回调注册 (同 Window 模式, fire-and-forget dispatch) =====
 
   /**
-   * 注册 Keyboard 回调 (KMP → ArkTS 跨线程 dispatch, 软键盘显隐/避让)。
+   * 注册 Keyboard 回调 (KMP → ArkTS 跨线程 dispatch, 软键盘收起/避让)。
    *
    * C++ 侧创建 napi_threadsafe_function 包装 [callback], 并通过 @CName legado_register_keyboard_fn
    * 把 dispatch 函数指针注入 Kotlin OhosNativeBridge.keyboardTsfn。此后 KMP 调
-   * OhosNativeBridge.hideSoftInput/showSoftInput/setKeyboardAvoidMode 时, 命令跨线程
+   * OhosNativeBridge.hideSoftInput/setKeyboardAvoidMode 时, 命令跨线程
    * dispatch 到此 [callback], 由 ArkTS 调 @ohos.inputMethod.getController。
    * fire-and-forget (同 Window 模式), 无 ArkTS → Kotlin 结果回调。
    *
-   * @param callback 接收 JSON 命令 `{ action: 'hide'|'show'|'setAvoidMode', mode?: <0-2> }`
+   * @param callback 接收 JSON 命令 `{ action: 'hide'|'setAvoidMode', mode?: <0-2> }`
    */
   registerKeyboardCallback(callback: (json: string) => void): void;
 

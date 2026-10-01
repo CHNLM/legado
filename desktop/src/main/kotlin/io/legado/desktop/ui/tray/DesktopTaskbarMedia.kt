@@ -19,7 +19,7 @@ import io.legado.app.help.media.RemoteMediaCommand
 import io.legado.app.help.media.SystemMediaControl
 import io.legado.app.model.AudioPlayCommanders
 import io.legado.app.service.ReadAloudControllerShared.ReadAloudState
-import io.legado.app.ui.compose.platform.jvmGetString
+import io.legado.app.ui.compose.platform.syncGetString
 import io.legado.desktop.help.win.ComCtl32
 import io.legado.desktop.help.win.createHiddenMessageWindow
 import io.legado.desktop.help.win.registerMessageWindowClass
@@ -112,10 +112,17 @@ internal object DesktopTaskbarMedia {
     private const val ILC_COLOR32 = 0x20
 
     /**
-     * 按钮图标尺寸。Win11 任务栏 thumbbar 按 24px 渲染 (100% DPI),
-     * 给 16px 会被放大导致字形发虚 (demo 逐尺寸实测: 16 糊, 24 清晰)。
+     * 按钮图标边长 (物理像素) —— 取系统图标度量 SM_CXICON。
+     *
+     * 官方文档 (ITaskbarList3::ThumbBarSetImageList) 要求 thumbbar 按钮图像
+     * "must be 32-bit and of dimensions GetSystemMetrics(SM_CXICON) x GetSystemMetrics(SM_CYICON)"，
+     * 并要求 "Images suitable for use with high-dpi displays"。
+     *
+     * 任务栏再把它绘进 SM_CXSMICON 大小的槽位 (本机 Win11 26200 / 125% DPI 实测: 槽位 20x20,
+     * SM_CXICON=40), 两者在 100%/125%/150% 各档位都是 2:1, 下采样无混叠。
      */
-    private const val ICON_SIZE = 24
+    private val ICON_SIZE: Int
+        get() = User32.INSTANCE.GetSystemMetrics(WinUser.SM_CXICON)
 
     // 缩略图按钮图标索引 (ImageList 添加顺序)
     private const val ICON_PREV = 0
@@ -195,6 +202,19 @@ internal object DesktopTaskbarMedia {
         Thread(r, "legado-taskbar-cmd").apply { isDaemon = true }
     }
 
+    /**
+     * 统一释放 GDI/COM 对象并检查返回值与异常。
+     *
+     * DeleteObject/ImageList_Destroy 返回 false 或抛异常都是**句柄泄漏**, 泄漏累积到上限后
+     * 任务栏按钮会整体画不出来, 不能静默吃 —— 口径同 [DesktopTaskbarDwm] 的 deleteObjectChecked
+     * (runCatching 只挡异常, 返回 false 也要上报)。
+     */
+    private inline fun releaseChecked(what: String, block: () -> Any?) {
+        runCatching(block)
+            .onSuccess { if (it == false) AppLog.put("$what 返回 false (句柄泄漏)") }
+            .onFailure { AppLog.put("$what 释放异常", it) }
+    }
+
     // ==================== 生命周期 ====================
 
     /** 启动消息线程 (隐藏窗口 + 全局媒体键 + TaskbarCreated) (幂等; 非 Windows 跳过)。 */
@@ -213,7 +233,10 @@ internal object DesktopTaskbarMedia {
 
     /**
      * 主窗口可用时注入 (Main.kt 在 Window 组装后调用), 挂缩略图按钮 + DWM 卡片。
-     * 窗口重建 (如全屏切换) 时重新挂。
+     *
+     * 当前只在主窗口组装时调一次 (全屏切换走改样式、不重建窗口, 故 HWND 不变)。若将来真引入
+     * 窗口重建, 本函数与 [DesktopTaskbarDwm.attach] 都只换 mainHwnd 而不对旧 HWND 关两项 iconic
+     * 属性 —— 那条路径现在不可达, 不预先加清理代码。
      */
     fun attach(window: Window) {
         if (!Platform.isWindows()) return
@@ -243,9 +266,11 @@ internal object DesktopTaskbarMedia {
         DesktopTaskbarDwm.uninstall()
         // 释放 COM 实例 (IUnknown::Release, vtable slot 2) —— 须在创建它的 STA 线程上
         runOnPump {
-            cachedTaskbarList?.let { runCatching { vtbl(it, 2) } }
+            cachedTaskbarList?.let { list -> releaseChecked("ITaskbarList3 Release") { vtbl(list, 2) } }
             cachedTaskbarList = null
-            imageList?.let { runCatching { ComCtl32.INSTANCE.ImageList_Destroy(it) } }
+            imageList?.let { himl ->
+                releaseChecked("任务栏图标 ImageList_Destroy") { ComCtl32.INSTANCE.ImageList_Destroy(himl) }
+            }
             imageList = null
         }
         val pump = pumpWindow
@@ -253,6 +278,9 @@ internal object DesktopTaskbarMedia {
         if (pump != null) {
             User32.INSTANCE.PostMessage(pump, WM_QUIT, WinDef.WPARAM(0), WinDef.LPARAM(0))
         }
+        // 命令执行器随托盘一起结束 (uninstall 只在应用退出路径调用): 留着会在进程收尾期间
+        // 继续跑投递进来的任务
+        commandExecutor.shutdown()
     }
 
     // ==================== 状态刷新 ====================
@@ -415,10 +443,12 @@ internal object DesktopTaskbarMedia {
         mem.setInt(base + 8, iconIndex) // iBitmap
         mem.setLong(base + 16, 0) // hIcon (x64 指针, 12..16 为对齐填充)
         val tipBase = base + 24
-        tip.take(259).forEachIndexed { i, c -> mem.setChar(tipBase + i * 2L, c) }
-        // szTip[260] WCHAR: 内容后显式补 0 终止符 —— JNA Memory 分配后不清零,
-        // 不终止的话 explorer 读 tip 越界读到未初始化内存 (乱码尾巴/随机乱码)
-        mem.setChar(tipBase + tip.length * 2L, '\u0000')
+        // szTip[260] WCHAR: 按**实际写入长度**补 0 终止符 —— JNA Memory 分配后不清零,
+        // 不终止 explorer 会越界读到未初始化内存 (乱码尾巴); 用未截断的 tip.length 算偏移会在
+        // 本地化文案超过 259 字符时把终止符写到 szTip[260] 之外, 破坏相邻按钮字段
+        val written = tip.take(259)
+        written.forEachIndexed { i, c -> mem.setChar(tipBase + i * 2L, c) }
+        mem.setChar(tipBase + written.length * 2L, '\u0000')
         mem.setInt(base + 544, flags) // dwFlags
     }
 
@@ -674,7 +704,7 @@ internal object DesktopTaskbarMedia {
             // HrInit (slot 3): 必须在任何其他调用前; 失败则整个 ITaskbarList3 不可用
             if (vtbl(punk, SLOT_HRINIT) != 0) {
                 AppLog.put("ITaskbarList3 HrInit 失败")
-                runCatching { vtbl(punk, 2) }   // Release
+                releaseChecked("ITaskbarList3 Release") { vtbl(punk, 2) }
                 return null
             }
             cachedTaskbarList = punk
@@ -719,9 +749,12 @@ internal object DesktopTaskbarMedia {
         imageList?.let { return it }
         synchronized(this) {
             imageList?.let { return it }
+            // 列表尺寸与图标绘制尺寸必须同源: 两次 GetSystemMetrics 之间 DPI 若变化,
+            // 会出现列表与图标尺寸错配 (任务栏裁剪/留白)
+            val iconSize = ICON_SIZE
             // 列表标志与 Add 的掩码必须自洽 (ILC_MASK ⇔ 传 hbmMask), 否则任务栏渲染异常
             val himl = ComCtl32.INSTANCE
-                .ImageList_Create(ICON_SIZE, ICON_SIZE, ILC_COLOR32 or ILC_MASK, 5, 0)
+                .ImageList_Create(iconSize, iconSize, ILC_COLOR32 or ILC_MASK, 5, 0)
                 ?: run {
                     AppLog.put("任务栏按钮图标: ImageList_Create 失败")
                     return null
@@ -734,7 +767,7 @@ internal object DesktopTaskbarMedia {
                 val bitmaps = mutableListOf<Pair<WinDef.HBITMAP, WinDef.HBITMAP>>()
                 try {
                     for (glyph in glyphs) {
-                        val (hbm, hbmMask) = ICON_SIZE.createThumbBitmap(glyph)
+                        val (hbm, hbmMask) = iconSize.createThumbBitmap(glyph)
                             ?: error("createThumbBitmap 失败 glyph=$glyph")
                         bitmaps += hbm to hbmMask
                         // ImageList_Add 复制位图入列, 返回后即可释放 GDI 对象
@@ -743,14 +776,14 @@ internal object DesktopTaskbarMedia {
                     }
                 } finally {
                     bitmaps.forEach { (hbm, mask) ->
-                        runCatching { GDI32.INSTANCE.DeleteObject(hbm) }
-                        runCatching { GDI32.INSTANCE.DeleteObject(mask) }
+                        releaseChecked("任务栏图标位图 DeleteObject") { GDI32.INSTANCE.DeleteObject(hbm) }
+                        releaseChecked("任务栏图标掩码 DeleteObject") { GDI32.INSTANCE.DeleteObject(mask) }
                     }
                 }
             }
             if (built.isFailure) {
                 AppLog.put("任务栏按钮图标构建失败", built.exceptionOrNull())
-                runCatching { ComCtl32.INSTANCE.ImageList_Destroy(himl) }
+                releaseChecked("构建失败时 ImageList_Destroy") { ComCtl32.INSTANCE.ImageList_Destroy(himl) }
                 return null
             }
             imageList = himl
@@ -768,7 +801,7 @@ internal object DesktopTaskbarMedia {
         val img = drawGlyphImage(this, glyph)
         val hbm = toPremultipliedHBitmap(img) ?: return null
         val hbmMask = createMaskDib(this, img) ?: run {
-            runCatching { GDI32.INSTANCE.DeleteObject(hbm) }
+            releaseChecked("掩码创建失败时 DeleteObject") { GDI32.INSTANCE.DeleteObject(hbm) }
             return null
         }
         return hbm to hbmMask
@@ -951,7 +984,7 @@ internal object DesktopTaskbarMedia {
 
 
     private fun str(key: String, fallback: String): String =
-        jvmGetString(key).takeIf { it != key } ?: fallback
+        syncGetString(key).takeIf { it != key } ?: fallback
 
     /**
      * 主窗口 HWND (供 DesktopSmtc 绑定 SMTC 会话)。

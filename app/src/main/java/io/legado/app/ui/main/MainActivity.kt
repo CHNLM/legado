@@ -1,6 +1,11 @@
 package io.legado.app.ui.main
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
+import androidx.core.content.ContextCompat
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
@@ -46,9 +51,7 @@ import io.legado.app.help.book.isLocal
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.config.LocalReadConfigProviders
-import io.legado.app.help.config.ReadBookConfigProviders
 import io.legado.app.help.config.ReadConfigProviders
-import io.legado.app.help.config.ReadTipConfigShared
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.i18n.androidAppString
 import io.legado.app.help.image.registerReaderImageResolver
@@ -133,6 +136,19 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
     private var exitTime: Long = 0
     private val EXIT_INTERVAL = 2000L
     private val exportBookPathKey = "exportBookPath"
+
+    /** 视频画中画 provider: PiP 模式切换回调由此转发到共享层渲染状态。 */
+    private var videoPlayProvider: AndroidVideoPlayPlatformProvider? = null
+
+    /** 画中画小窗内遥控 RemoteAction 的广播接收 (onCreate 注册, onDestroy 注销) */
+    private val pipControlReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != AndroidVideoPlayPlatformProvider.ACTION_MEDIA_CONTROL) return
+            videoPlayProvider?.onPipControl(
+                intent.getIntExtra(AndroidVideoPlayPlatformProvider.EXTRA_CONTROL_TYPE, 0)
+            )
+        }
+    }
 
     /** 换封面源回调暂存: 由 [AndroidPlatformCapabilities.showChangeCoverDialog] 写入,
      *  ChangeCoverDialog 触发 [coverChangeTo] 时消费。 */
@@ -533,13 +549,8 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
         val context = LocalContext.current
 
         // 阅读器注入: ReaderRoute/ReaderDrawStyle 消费, 缺省值是 error() 会崩;
-        // readBookConfig 必须与全局 ReadBookConfigProviders 同实例, 否则配置写读分家
-        val readConfigProviders = remember {
-            object : ReadConfigProviders {
-                override val readBookConfig = ReadBookConfigProviders.get()
-                override val readTipConfig = ReadTipConfigShared(readBookConfig)
-            }
-        }
+        // 注入实例取全局注册的同一份, 与设置弹窗读写同一份配置
+        val readConfigProviders = remember { ReadConfigProviders() }
 
         Box(Modifier.fillMaxSize()) {
             // 封面渲染不再注入 app 端 View 实现, 各端统一走 shared 默认 SharedBookCover
@@ -615,7 +626,16 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
         ReaderPlatformProviders.register(readerPlatform)
         AudioPlayPlatformProviders.register(SharedAudioPlayPlatformProvider)
         MangaReaderScreenModel.Providers.register(AndroidMangaReaderPlatform)
-        VideoPlayPlatformProviders.register(AndroidVideoPlayPlatformProvider(this))
+        videoPlayProvider = AndroidVideoPlayPlatformProvider(this)
+            .also { VideoPlayPlatformProviders.register(it) }
+        // 小窗内播放/暂停钮的广播通道 (系统 RemoteAction 触发); setPackage 限定自身,
+        // 否则 NOT_EXPORTED receiver 收不到隐式广播
+        ContextCompat.registerReceiver(
+            this,
+            pipControlReceiver,
+            IntentFilter(AndroidVideoPlayPlatformProvider.ACTION_MEDIA_CONTROL),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         // 排版度量走真实字形（对照 TextStyleProvider.getPaints 的 contentPaint）
         TextMeasurerProviders.register { textSizePx, letterSpacingPx, fontPath, weight ->
             AndroidTextMeasurer(TextPaint().apply {
@@ -657,6 +677,16 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
         handleExternalIntent(intent, isNewIntent = true)
     }
 
+    // 进入/退出系统画中画 (API 26+, 仅在 PiP 模式变化时回调): 两参重载自 API 26 才有,
+    // 低版本永不触发, 无需版本门控。只转发平台态, 渲染分切换由共享层读 provider 状态完成。
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        videoPlayProvider?.onPipModeChanged(isInPictureInPictureMode)
+    }
+
     /**
      * 解析外部 Intent (DeepLink / 文件关联 / PROCESS_TEXT / 直达入口) 并投递到 shared:
      * - legado:// / yuedu:// → [LegadoDeepLinkHandler] → DeepLinkImportHost 弹导入对话框
@@ -696,6 +726,7 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
      * Intent → 可直达的目标路由 (仅创建路径用, 见 [handleExternalIntent]):
      * - SearchActivity alias (key/searchScope/submit extra)
      * - ExploreShowActivity alias (exploreName/exploreUrl/sourceUrl extra, 查源下沉路由内)
+     * - 视频直投 (content/file/http(s) 可播地址 → 播放页, 排在书籍导入之前)
      * - 文件关联 / PROCESS_TEXT / SEND
      *
      * 书籍类直达 (透明壳深链 / 文件关联打开书籍) 不在此: 它们的载荷是内存对象,
@@ -720,6 +751,10 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
                 exploreUrl = intent.getStringExtra("exploreUrl"),
             )
         }
+        // 视频直投排在书籍分流之前 (判据与 toLaunchRequest 共用 [Intent.videoDirectTarget]):
+        // 外部给的 mp4/m3u8 已是可播地址, 不是书 —— 落到 AppRoute.ImportBook 会进"导入本地书"
+        // 页再被嗅探判为不支持格式。命中即冷启动直达播放页 (调用方处包 asRoot, back 即退调用方)。
+        intent?.videoDirectTarget()?.let { return AppRoute.VideoPlay(it) }
         // 文件关联 / PROCESS_TEXT / SEND (对齐 toLaunchRequest 分支)
         return when (intent?.action) {
             Intent.ACTION_VIEW -> intent.dataString?.let { url ->
@@ -753,11 +788,16 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
         viewModel.updateUpdateNotification()
     }
 
-    // app 前后台唯一置位点 (单 Activity 宿主): 阅读/漫画/视频页经 RouteActiveEffect 消费,
+    // app 前后台唯一置位点 (单 Activity 宿主): 各页经本页 Lifecycle 消费 (见 RouteLifecycle),
     // 各页不再自挂生命周期监听 (对照原版各 Activity 的 onResume/onPause)
     override fun onResume() {
         super.onResume()
         AppForegroundState.set(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // 按系统真实态校正画中画标志: 关闭小窗的 onPictureInPictureModeChanged(false)
+            // 在部分场景不送达/迟到, 残留 true 会让视频页停在“纯画面”渲染, 控制器全部不显示
+            videoPlayProvider?.onPipModeChanged(isInPictureInPictureMode)
+        }
     }
 
     override fun onPause() {
@@ -768,6 +808,9 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
     override fun onStop() {
         super.onStop()
         viewModel.isActivityVisible = false
+        // 官方 PiP 指南钦定模式 (视频只在可见时播放): onStop 即暂停,
+        // 无需判断是否处于/离开画中画。
+        videoPlayProvider?.onActivityStopped()
         if (isFinishing) {
             // 退出应用时取消刷新任务, 避免弹出通知
             viewModel.cancelRefreshJobs()
@@ -809,7 +852,7 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
     private suspend fun privacyPolicy(): Boolean {
         if (LocalConfig.privacyPolicyOk) return true
         // privacyPolicy.md 统一存于 shared composeResources files/md (四端共享一份),
-        // 经 WebAssetSources 读 (Android 走 assets, 与关于页 MdDocDialog 同一条通道)
+        // 经 WebAssetSources 读 (四端同一 composeResources 取数路径, 与关于页 MdDocDialog 同源)
         val privacyPolicy = withContext(IO) {
             runCatching {
                 WebAssetSources.get().read("md/privacyPolicy.md").decodeToString()
@@ -917,6 +960,7 @@ class MainActivity : BaseComposeActivity(imageBg = false) {
 
     override fun onDestroy() {
         super.onDestroy()
+        unregisterReceiver(pipControlReceiver)
         if (!BuildConfig.DEBUG) {
             Backup.autoBack(this)
         }

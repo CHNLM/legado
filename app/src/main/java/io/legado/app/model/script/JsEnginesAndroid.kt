@@ -3,17 +3,11 @@ package io.legado.app.model.script
 import android.provider.Settings
 import io.legado.app.App
 import io.legado.app.constant.AndroidIdHolder
-import io.legado.app.data.entities.BaseSource
-import io.legado.app.data.entities.BookSource
-import io.legado.app.data.entities.BookSourceJsExt
-import io.legado.app.data.entities.HttpTTS
-import io.legado.app.data.entities.HttpTTSJsExt
 import io.legado.app.help.CacheManager
-import io.legado.app.help.DEFAULT_DATA_ASSET_PREFIX
 import io.legado.app.help.ExploreKindsCacheProvider
 import io.legado.app.help.ExploreKindsCacheProviders
-import io.legado.app.help.JsExtFactory
-import io.legado.app.help.JsExtProviders
+import io.legado.app.help.JsCryptoProviderJvm
+import io.legado.app.help.JsCryptoProviders
 import io.legado.app.help.RuleBigDataHelp
 import io.legado.app.help.RuleBigDataProviders
 import io.legado.app.help.UserAgentProvider
@@ -23,6 +17,7 @@ import io.legado.app.help.http.CookieStore
 import io.legado.app.help.http.OkHttpProxyClientProvider
 import io.legado.app.help.http.OkHttpProxyClientProviders
 import io.legado.app.help.image.BitmapImageOps
+import io.legado.app.help.registerComposeDefaultDataResourceProvider
 import io.legado.app.help.source.SourceCacheProvider
 import io.legado.app.help.source.SourceCacheProviders
 import io.legado.app.help.source.SourceDebugLogger
@@ -53,13 +48,11 @@ fun registerAndroidJsEngines() {
     JsEngines.registerProvider { type ->
         when (type) {
             JsEngineType.QUICKJS -> QuickJsJsEngine
-            else -> error("rhino 已弃用,JsEngines.type 固定 QUICKJS,不应到达 type=$type")
         }
     }
     SharedJsScope.registerProviders { type ->
         when (type) {
             JsEngineType.QUICKJS -> QuickJsSharedJsScopeProvider
-            else -> error("rhino 已弃用,JsEngines.type 固定 QUICKJS,不应到达 type=$type")
         }
     }
     // 简繁词典 tc 缓存定位器(含缺失后台拉取), shared ChineseUtils 走 provider 注入
@@ -103,23 +96,13 @@ fun registerAndroidJsEngines() {
         )
     }
     SourceDebugLoggers.impl = object : SourceDebugLogger {
-        override fun log(key: String, msg: String, print: Boolean, state: Int) =
-            Debug.log(key, msg, print = print, state = state)
+        override fun log(key: String, msg: String, print: Boolean, state: Int, showTime: Boolean) =
+            Debug.log(key, msg, print = print, state = state, showTime = showTime)
 
         override fun log(msg: String) = Debug.log(msg)
     }
-    // F2: BookSource/HttpTTS 下沉后不再继承 JsExtensions, 通过包装器补回 JS 可见的 JsExtensions 面。
-    // BaseSource.evalJS 注入 bindings["java"]/["source"] 时调用 wrap(this) 取得 BookSourceJsExt/HttpTTSJsExt。
-    JsExtProviders.register(object : JsExtFactory {
-        override fun wrap(source: BaseSource): Any = when (source) {
-            is BookSource -> BookSourceJsExt(source)
-            is HttpTTS -> HttpTTSJsExt(source)
-            // 兜底: 已是 JsExtensions 的对象 (如 AnalyzeUrl/AnalyzeRule, 但它们不继承 BaseSource,
-            // 实际不会命中) 直接返回。未知 BaseSource 子类无 JsExtensions 实现, JS 调用 ajax 等会失败,
-            // 但当前仅 BookSource/HttpTTS 两个 BaseSource 子类, 行为可控。
-            else -> source
-        }
-    })
+    // JS 加解密面 (JsExtensionsCommon 加解密默认方法) 的平台实现注册
+    JsCryptoProviders.register(JsCryptoProviderJvm)
     // F2: BookSource 下沉后访问 ACache.get("explore").getAsString/put(...) 走 provider, 行为不变。
     // exploreKinds() 已下沉到 shared BookSourceExtensionsShared.kt, 写入侧 (JS 解析出 ruleStr 后 put)
     // 与读侧 (getAsString) 均经此 provider 转发到 ACache。
@@ -136,20 +119,10 @@ fun registerAndroidJsEngines() {
     OkHttpProxyClientProviders.impl = object : OkHttpProxyClientProvider {
         override fun getProxyClient(proxy: String?) = io.legado.app.help.http.getProxyClient(proxy)
     }
-    // DefaultData 下沉 shared 后, 资源读取走 provider 注入。
+    // DefaultData 资源读取走 provider 注入 (实现是 :ui 的 ComposeResourceDefaultDataProvider,
+    // 经 Res.readBytes 取数, 打包前缀由资源生成器写进 Res)。
     // 必须在 registerAndroidWebBookProviders() 之前注册: appDb lazy 初始化触发 dbCallback.onCreate
-    // 时会访问 DefaultData.keyboardAssists (经 DefaultDataShared 间接读 assets)。
+    // 时会访问 DefaultData.keyboardAssists (经 DefaultDataShared 间接读资源)。
     // 注册时机: App.onCreate 中 registerAndroidJsEngines() 先于 registerAndroidWebBookProviders() 调用。
-    io.legado.app.help.DefaultDataResourceProviders.register(
-        object : io.legado.app.help.DefaultDataResourceProvider {
-            override fun readResource(name: String): String {
-                // 单一数据源在 shared/commonMain/composeResources/files/defaultData/,
-                // 由 compose 资源插件打进 assets (前缀含模块限定名, 同 AndroidWebAssetSource)。
-                return String(
-                    App.instance.assets
-                        .open("$DEFAULT_DATA_ASSET_PREFIX$name").readBytes()
-                )
-            }
-        }
-    )
+    registerComposeDefaultDataResourceProvider()
 }

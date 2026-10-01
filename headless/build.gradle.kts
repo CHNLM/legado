@@ -7,7 +7,7 @@
 // 只依赖 :desktop-core (无 UI 核心库)。依赖闭包核查:
 // ./gradlew :headless:dependencies --configuration runtimeClasspath
 //
-// 资源策略 (2026-09-06 裁决: 内置): files/ 资源随 shared jvmJar 分发 (classpath 直读);
+// 资源策略 (2026-09-06 裁决: 内置): files/ 资源随 :ui jvmJar 分发 (classpath 直读);
 // quickjs native 库复制进 jar 资源 (copyQuickjsNativeToHeadlessResources), Main 启动时
 // 提取到临时文件 System.load。分发包 headlessDist 只含 bin/ + lib/。
 
@@ -36,7 +36,7 @@ dependencies {
     implementation(project(":desktop-core"))
     // headless 直接调用 shared API (WebServerManager / registerJvmDebugState / ImageOps ...):
     // desktop-core 对 shared 是 implementation 不外泄, 需显式声明
-    implementation(project(":shared"))
+    implementation(project(":core"))
     implementation(libs.kotlinx.coroutines.core)
     // 基础图片加载单例 (SingletonImageLoader, 供 registerJvmBookImageLoader 注册, 50KB 纯核心无 Compose)
     implementation("io.coil-kt.coil3:coil:${libs.versions.coil3.get()}")
@@ -86,26 +86,23 @@ val quickjsNativeDir =
     file("${rootProject.projectDir}/modules/quickjs/build/libs/jvm/native/$quickjsPlatformId")
 val headlessNativeResDir = layout.buildDirectory.dir("generated/quickjs-native")
 
-val copyQuickjsNativeToHeadlessResources by tasks.registering(Copy::class) {
+val copyQuickjsNativeToHeadlessResources = tasks.register<Copy>("copyQuickjsNativeToHeadlessResources") {
     // 先触发 native 库构建，再从当前平台独占目录复制；避免捎带其他平台的陈旧库。
     dependsOn(project(":modules:quickjs").tasks.named("buildJvmNativeLib"))
-    from(quickjsNativeDir)
+    val nativeDir = quickjsNativeDir
+    val expectedLib = when {
+        OperatingSystem.current().isWindows -> "legado_quickjs.dll"
+        OperatingSystem.current().isMacOsX -> "liblegado_quickjs.dylib"
+        else -> "liblegado_quickjs.so"
+    }
+    from(nativeDir)
     include("*.dll", "*.so", "*.dylib")
     into(headlessNativeResDir)
-    inputs.dir(quickjsNativeDir).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(nativeDir).withPathSensitivity(PathSensitivity.RELATIVE)
     doFirst {
-        val expected = when {
-            OperatingSystem.current().isWindows -> "legado_quickjs.dll"
-            OperatingSystem.current().isMacOsX -> "liblegado_quickjs.dylib"
-            else -> "liblegado_quickjs.so"
-        }
-        if (!quickjsNativeDir.resolve(expected).isFile) {
+        if (!nativeDir.resolve(expectedLib).isFile) {
             throw GradleException(
-                "QuickJS native library is missing: ${
-                    quickjsNativeDir.resolve(
-                        expected
-                    )
-                }"
+                "QuickJS native library is missing: ${nativeDir.resolve(expectedLib)}"
             )
         }
     }
@@ -130,7 +127,7 @@ tasks.named("processResources") {
 // (本仓库 Gradle 8.14.5 下脚本平铺在 build/scripts/, 拷进 bin/ 即标准布局)。
 val headlessBundleDir = layout.buildDirectory.dir("headless-bundle")
 
-val bundleLib by tasks.registering(Sync::class) {
+val bundleLib = tasks.register<Sync>("bundleLib") {
     dependsOn(tasks.named("jar"))
     from(tasks.named("jar"))
     from(configurations.named("runtimeClasspath"))
@@ -140,7 +137,7 @@ val bundleLib by tasks.registering(Sync::class) {
     into(headlessBundleDir.map { it.dir("lib") })
 }
 
-val bundleBin by tasks.registering(Copy::class) {
+val bundleBin = tasks.register<Copy>("bundleBin") {
     dependsOn(tasks.named("startScripts"))
     from(layout.buildDirectory.dir("scripts"))
     into(headlessBundleDir.map { it.dir("bin") })

@@ -7,7 +7,6 @@ import io.legado.app.model.script.JsBindingInjector
 import io.legado.app.model.script.JsEngineType
 import io.legado.app.model.script.JsEngines
 import io.legado.app.model.script.quickjs.QuickJsJsEngine
-import io.legado.app.ui.compose.platform.jvmGetString
 import io.legado.app.utils.ChineseUtils
 import io.legado.app.utils.RemoteAssetsUtils
 import io.legado.app.utils.TcDictCachePathProvider
@@ -23,7 +22,7 @@ import java.nio.file.Paths
  * 1. 注册 JS 图片 API: 注入 [DesktopImageOps] 到 [JsBindingInjector]
  *    (基于 Skia 原生库纯 2D 像素操作, 支持 WebP/JPG/PNG 切片混淆解密, desktop 与 headless 共用);
  * 2. 注册 [QuickJsJsEngine] 到 [JsEngines] 作为 QUICKJS 引擎实现
- *    (QuickJsJsEngine 已下沉到 `modules/shared/src/jvmAndAndroidMain`,
+ *    (QuickJsJsEngine 已下沉到 `data/src/jvmAndAndroidMain`,
  *    委托 `modules:quickjs` 的 commonMain QuickJsEngine API,
  *    Android 端 `JsEnginesAndroid.kt` 也注册同一个 object, 行为完全一致);
  * 3. 注册 [DesktopQuickJsSharedJsScopeProvider] 到 [SharedJsScope]
@@ -58,7 +57,6 @@ fun registerDesktopJsEngines() {
     JsEngines.registerProvider { type ->
         when (type) {
             JsEngineType.QUICKJS -> QuickJsJsEngine
-            else -> error(jvmGetString("rhino_deprecated_unreachable", type))
         }
     }
     // 注册 SharedJsScope provider (jsLib 共享 scope 缓存)
@@ -67,7 +65,6 @@ fun registerDesktopJsEngines() {
     SharedJsScope.registerProviders { type ->
         when (type) {
             JsEngineType.QUICKJS -> DesktopQuickJsSharedJsScopeProvider
-            else -> error(jvmGetString("rhino_deprecated_unreachable", type))
         }
     }
     // 注册简繁词典缓存定位器 (替代 app 端 registerAndroidChineseUtils)

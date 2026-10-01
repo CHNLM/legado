@@ -9,10 +9,41 @@ legado iOS 端的 Xcode 工程骨架, 用 SwiftUI App 生命周期 (`@main`) + `
 iosApp/
 ├── iOSApp.swift       # SwiftUI App 入口 (@main), WindowGroup { ContentView() }
 ├── ContentView.swift  # UIViewControllerRepresentable 包装 MainViewControllerKt.MainViewController()
-├── Info.plist         # iOS App 配置 (屏幕方向/ATS/后台模式/Bundle ID)
+├── Info.plist         # iOS App 配置 (屏幕方向/ATS/后台模式/Bundle ID/文档类型)
 ├── project.yml        # XcodeGen 配置 (生成 .xcodeproj, 避免 git 二进制冲突)
+├── AppIcon.png        # 主图标 (由 scripts/GenerateIosIcons.kt 从 Android 矢量图生成)
+├── Icon1/4/5.png      # 交替图标 (换桌面图标, 对照 Android Launcher1/4/5)
+├── *.lproj/           # InfoPlist.strings: App 显示名本地化 (en/zh-Hans/zh-Hant/zh-Hant-HK)
 └── README.md          # 本文件 (macOS 构建说明)
 ```
+
+## 图标重生成
+
+图标 PNG 由 `scripts/GenerateIosIcons.kt` 从 `app/src/main/res/drawable/` 的 Android
+矢量图渲染 (与鸿蒙共用 `scripts/VectorIconCommon.kt`)。
+
+图标资源基本不改: 只有换 launcher 图标或改 `drawable/ic_launcher*.xml` 里的矢量时,
+才需要按脚本头部注释的命令手工重跑一次, 重跑后把 `iosApp/*.png` 一并提交。
+脚本是备用工具, 没有 Gradle/CI 调用点, 不会随构建自动跑。
+
+鸿蒙侧对应脚本为 `scripts/GenerateOhosIcons.kt`, 输出到
+`ohosApp/AppScope/resources/base/media/`。
+
+## App 显示名本地化
+
+iOS 的 App 名以各 `<lang>.lproj/InfoPlist.strings` 的 `CFBundleDisplayName` 为准,
+系统按当前语言挑选; `Info.plist` 与 `project.yml` 里的同名键只是缺本地化资源时的兜底。
+本工程四份与 app 端 `res/values*` 的 `app_name` 逐字对应:
+
+| .lproj | 显示名 | 对照 Android |
+| --- | --- | --- |
+| `en` | Legado | `res/values/strings.xml` |
+| `zh-Hans` | 阅读 | `res/values-zh/strings.xml` |
+| `zh-Hant` | 閱讀 | `res/values-zh-rTW/strings.xml` |
+| `zh-Hant-HK` | 閲讀 | `res/values-zh-rHK/strings.xml` |
+
+`Info.plist` 与 `project.yml` 里的 `CFBundleDisplayName` 只是缺本地化资源时的兜底,
+改显示名要改上面四份 `.strings`。
 
 ## 调用链
 
@@ -56,7 +87,7 @@ xcodegen generate
 
 `project.yml` 使用 Kotlin 官方 `embedAndSignAppleFrameworkForXcode` 任务。Xcode 每次构建会根据
 当前 `SDK_NAME`、`ARCHS` 和 Debug/Release 自动选择正确的 Kotlin target，复制 framework 到
-`TARGET_BUILD_DIR` 并完成签名，不再依赖硬编码的 `shared/build/bin/...` 路径。
+`TARGET_BUILD_DIR` 并完成签名，不再依赖硬编码的 `ui/build/bin/...` 路径。
 
 直接在 Xcode 构建即可；如由 Android Studio/IntelliJ 的 iOS 运行配置发起，脚本会通过
 `OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED` 避免重复调用 Gradle。
@@ -85,7 +116,7 @@ iOS 端代码改动 (iosMain/) 在 Windows 上无法编译验证, 但 IDE (Andro
 
 - App: `shutiao.reader`（Debug 构建 `shutiao.reader.debug`，Release 构建 `shutiao.reader.release`，与安卓
   applicationId 对齐）
-- 共享 framework: `io.legado.shared` (shared 模块 namespace)
+- 共享 framework: `io.legado.shared` (:ui 模块 iOS framework baseName)
 
 ## 签名
 
@@ -100,7 +131,7 @@ iOS 端零薄壳架构: `MainViewController.kt` 直接调用 shared `LegadoApp`,
 `RouteContent` 统一分发, 不再维护 `IosNavHost` / `IosBookshelfScreen` / `IosReaderScreen` /
 `IosSearchScreen` / `IosBookInfoScreen` / `IosBookSourceScreen` 等平台薄壳 Composable。
 
-### 内部调用关系 (shared/src/iosMain/.../MainViewController.kt)
+### 内部调用关系 (ui/src/iosMain/.../MainViewController.kt)
 
 ```
 ComposeUIViewController
@@ -113,7 +144,7 @@ ComposeUIViewController
         └── DeepLinkImportHost()  (legado:// deep link 导入)
 ```
 
-### iOS 平台能力 actual 实现 (shared/src/iosMain/)
+### iOS 平台能力 actual 实现 (ui/src/iosMain/)
 
 | 模块                  | 实现                                                                                                            |
 |---------------------|---------------------------------------------------------------------------------------------------------------|
@@ -132,5 +163,5 @@ ComposeUIViewController
 | 其他                  | `IosFilePicker.ios.kt` / `IosImagePicker.ios.kt` / `IosOpenUrlProvider.kt` / `NativeUserAgentProvider.kt` 等   |
 
 > 注: 上述 iOS target 代码在 Windows 上无法编译验证, 真实编译验证必须在 macOS 上进行
-> (`./gradlew :shared:compileKotlinIosArm64`)。UIAlertController/UNNotificationRequest 工厂方法
+> (`./gradlew :ui:compileKotlinIosArm64`)。UIAlertController/UNNotificationRequest 工厂方法
 > 与 NS_OPTIONS 位运算等少数 ObjC 桥接细节如遇编译报错, 按文件内 TODO 注释微调即可。

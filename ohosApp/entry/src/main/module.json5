@@ -28,6 +28,25 @@
       {
         "name": "ohos.permission.GET_NETWORK_INFO"
       },
+      // 网络访问 (normal 级, system_grant 安装即授予), 与 Android 端
+      // AndroidManifest 的 android.permission.INTERNET 对齐;
+      // 未申报时 @ohos.net.http 全部请求失败 (HttpBridgeHandler 经它发真实请求)。
+      {
+        "name": "ohos.permission.INTERNET"
+      },
+      // 读剪贴板 (user_grant, 首次读取时弹窗申请): 书源/替换规则编辑页的
+      // "从剪贴板粘贴" 经 PasteboardBridgeHandler 读系统剪贴板。
+      // 拒绝授权时 PlatformCapabilities.getClipboardText 返回 null, 粘贴入口无内容。
+      {
+        "name": "ohos.permission.READ_PASTEBOARD",
+        "reason": "$string:permission_read_pasteboard_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
       }
@@ -92,6 +111,36 @@
               },
               {
                 "type": "text/xml"
+              },
+              // 视频投递入口: 与 shared AppPattern.videoFileRegex (mp4|mkv|mov|webm|flv|ts|m3u8)
+              // 对齐逐条列具体 MIME。不用 `video/*` 通配 —— 本 SDK 的 modulecheck 把
+              // skills.uris[].type 只定义成自由字符串 (无枚举、无通配符校验, 见
+              // sdk/default/openharmony/toolchains/modulecheck/module.json), 通配是否参与
+              // 运行期匹配无本地依据, 不凭记忆造配置; 与本文件已有的 text/plain 等写法同构。
+              // 上面的 application/octet-stream 保留不动: 文件管理器报不出具体类型时靠它兜底,
+              // 命不命中视频由 KMP 侧按扩展名 / want.type 再判一次。
+              // avi 故意不申报: AVPlayer 只解 MP4/MPEG-TS/MKV (见 @ohos.multimedia.media.d.ts
+              // AVPlayer.url 注释), 报了入口也是必然失败。
+              {
+                "type": "video/mp4"
+              },
+              {
+                "type": "video/quicktime"
+              },
+              {
+                "type": "video/x-matroska"
+              },
+              {
+                "type": "video/webm"
+              },
+              {
+                "type": "video/x-flv"
+              },
+              {
+                "type": "video/mp2t"
+              },
+              {
+                "type": "application/vnd.apple.mpegurl"
               }
             ]
           }
